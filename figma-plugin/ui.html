@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { font: 12px sans-serif; margin: 16px; color: #333; }
+  h3 { margin: 0 0 12px; }
+  input[type=file] { width: 100%; margin-bottom: 12px; }
+  button { width: 100%; padding: 8px; border: 0; border-radius: 6px;
+           background: #18a0fb; color: #fff; font-weight: 600; cursor: pointer; }
+  button:disabled { background: #ccc; cursor: default; }
+  #log { margin-top: 12px; white-space: pre-wrap; color: #666; max-height: 160px; overflow: auto; }
+</style>
+</head>
+<body>
+  <h3>Import AE composition</h3>
+  <p style="margin:0 0 8px;color:#888">Select the <b>.json</b> and (optionally) the images from its <b>_assets</b> folder.</p>
+  <input type="file" id="file" accept=".json,image/*" multiple />
+  <button id="import" disabled>Import</button>
+  <div id="log"></div>
+<script>
+  var fileInput = document.getElementById('file');
+  var importBtn = document.getElementById('import');
+  var log = document.getElementById('log');
+  var payload = null;
+  var images = {}; // filename -> Uint8Array (read natively, no base64)
+
+  // Select the .json plus, optionally, the image files from the _assets folder.
+  fileInput.onchange = function () {
+    payload = null; images = {};
+    var files = Array.prototype.slice.call(fileInput.files);
+    var jsonFile = null, imageFiles = [];
+    files.forEach(function (f) {
+      if (/\.json$/i.test(f.name)) jsonFile = f;
+      else if (/\.(png|jpe?g|gif|webp|bmp|tiff?)$/i.test(f.name)) imageFiles.push(f);
+    });
+    if (!jsonFile) { log.textContent = 'Select a .json file (and optionally its images).'; importBtn.disabled = true; return; }
+
+    var jr = new FileReader();
+    jr.onload = function () {
+      try { payload = JSON.parse(jr.result); }
+      catch (e) { payload = null; importBtn.disabled = true; log.textContent = 'Not valid JSON: ' + e.message; return; }
+      // Read any selected images into byte arrays, keyed by filename.
+      var pending = imageFiles.length;
+      var finish = function () {
+        importBtn.disabled = false;
+        log.textContent = 'Loaded "' + (payload.comp && payload.comp.name) + '" - ' +
+          (payload.layers ? payload.layers.length : 0) + ' layers, ' +
+          Object.keys(images).length + ' image(s).';
+      };
+      if (!pending) return finish();
+      imageFiles.forEach(function (f) {
+        var ir = new FileReader();
+        ir.onload = function () { images[f.name] = new Uint8Array(ir.result); if (--pending === 0) finish(); };
+        ir.onerror = function () { if (--pending === 0) finish(); };
+        ir.readAsArrayBuffer(f);
+      });
+    };
+    jr.readAsText(jsonFile);
+  };
+
+  importBtn.onclick = function () {
+    if (!payload) return;
+    importBtn.disabled = true;
+    log.textContent = 'Importing...';
+    parent.postMessage({ pluginMessage: { type: 'import', data: payload, images: images } }, '*');
+  };
+
+  onmessage = function (e) {
+    var msg = e.data.pluginMessage;
+    if (!msg) return;
+    if (msg.type === 'log') log.textContent += '\n' + msg.text;
+    if (msg.type === 'done') { log.textContent += '\n✅ ' + msg.text; importBtn.disabled = false; }
+    if (msg.type === 'error') { log.textContent += '\n❌ ' + msg.text; importBtn.disabled = false; }
+  };
+</script>
+</body>
+</html>

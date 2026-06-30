@@ -1,9 +1,13 @@
 # Secrets & local config
 .env
 .env.*
-!.env.example
 .claude/settings.local.json
 *.local
+
+# Exported test artifacts (don't commit users' comps)
+*_assets/
+/*.json
+!figma-plugin/manifest.json
 
 # Dependencies
 node_modules/

@@ -1,0 +1,10 @@
+{
+  "name": "AE to Figma Importer",
+  "id": "ae-to-figma-importer",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "capabilities": [],
+  "documentAccess": "dynamic-page"
+}
