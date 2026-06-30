@@ -1,0 +1,36 @@
+# Secrets & local config
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
+*.local
+
+# Dependencies
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+vendor/
+
+# Build output
+dist/
+build/
+out/
+target/
+*.tsbuildinfo
+
+# Logs & temp
+*.log
+.omc/logs/
+.cache/
+tmp/
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+*.swp
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json

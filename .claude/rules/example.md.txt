@@ -1,0 +1,15 @@
+RENAME this file to a descriptive name ending in `.md` (e.g. `api.md`,
+`testing.md`, `frontend.md`) to activate it. It stays inert as a `.txt`.
+
+Delete the lines above and edit the rule below to fit your project.
+
+---
+paths:
+  - "src/**/*.{ts,tsx}"
+---
+
+# <Topic> rules
+
+- <Specific, verifiable rule. e.g. "All exported functions have explicit return types.">
+- <e.g. "Co-locate tests as `<name>.test.ts` next to the source file.">
+- <e.g. "No default exports — use named exports.">
