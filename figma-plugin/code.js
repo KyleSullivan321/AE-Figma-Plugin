@@ -47,51 +47,90 @@ async function importComp(data) {
   root.x = 0; root.y = 0;
   figma.currentPage.appendChild(root);
 
-  // Build nodes first (flat), then wire parenting, then keyframes — so a child can
-  // reference a parent created later in the list.
-  var byIndex = {};   // AE index -> figma node
-  var entries = [];   // keep layer data alongside node for later passes
+  // Build the parent/child hierarchy so an animated parent (e.g. a null-object rig)
+  // propagates its motion to children. AE parenting inherits position/rotation/scale
+  // (NOT opacity). We rebuild each PARENT layer as a Figma FRAME centered on its anchor
+  // point (so rotation/scale pivot around the anchor, matching AE) that carries the
+  // parent's transform + tracks; the parent's own content and its children nest inside.
+  var layerByIndex = {};
+  var childrenOf = {}; // parentIndex -> [layer]
+  var rootLayers = [];
+  data.layers.forEach(function (L) { layerByIndex[L.index] = L; });
+  data.layers.forEach(function (L) {
+    if (L.parentIndex != null && layerByIndex[L.parentIndex]) {
+      (childrenOf[L.parentIndex] = childrenOf[L.parentIndex] || []).push(L);
+    } else {
+      rootLayers.push(L);
+    }
+  });
+  function isParent(L) { return !!(childrenOf[L.index] && childrenOf[L.index].length); }
 
-  // AE draws top layer first; Figma appendChild stacks later = on top. Reverse so
-  // AE's z-order is preserved (layer 1 ends up on top).
-  var ordered = data.layers.slice().reverse();
-
-  for (var i = 0; i < ordered.length; i++) {
-    var L = ordered[i];
-    var node = await createNode(L);
-    if (!node) continue;
-    byIndex[L.index] = node;
-    entries.push({ data: L, node: node });
-    log('Created ' + L.type + ': ' + L.name);
-  }
-
-  // Placement: AE parenting is FLATTENED. Figma shapes/text/solids can't contain children,
-  // so we don't rebuild the hierarchy; instead every layer is placed at its ABSOLUTE
-  // comp-space position (via compBounds), which already bakes in each parent's transform at
-  // t=0. Static parented layouts and t=0 starts come out correct. Limitation: an animated
-  // PARENT's motion does not propagate to its children (e.g. a null-object rig) — the child
-  // gets its own animation from its correct starting spot, but won't follow the parent.
-  for (var j = 0; j < entries.length; j++) {
-    root.appendChild(entries[j].node);
-    positionNode(entries[j].node, entries[j].data, comp);
-  }
-
-  // Keyframes last, after layout is settled.
   var motionOk = true;
-  for (var k = 0; k < entries.length; k++) {
-    try {
-      applyKeyframes(entries[k].node, entries[k].data, comp);
-    } catch (err) {
-      motionOk = false;
-      log('Motion skipped for "' + entries[k].data.name + '": ' + (err && err.message || err));
+  var count = 0;
+
+  // Recursively build a layer into `container` (a Figma node), where `origin` is the
+  // container's comp-space top-left ([0,0] for the root frame).
+  async function build(L, container, origin) {
+    var content = await createNode(L);
+    count++;
+
+    if (isParent(L)) {
+      // Wrapper frame carries the layer's transform; content + children nest inside.
+      var cb = L.compBounds || [0, 0, 100, 100];
+      var w = Math.max(1, cb[2]), h = Math.max(1, cb[3]);
+      var anchor = L.anchorComp || [cb[0] + w / 2, cb[1] + h / 2];
+      var frame = figma.createFrame();
+      frame.name = L.name;
+      frame.clipsContent = false;
+      frame.fills = [];
+      frame.resize(w, h);
+      // Center the frame on the anchor (comp space) => Figma's center-pivot rotation/scale
+      // matches AE's anchor-pivot. Frame comp top-left:
+      var fx = anchor[0] - w / 2, fy = anchor[1] - h / 2;
+      container.appendChild(frame);
+      frame.x = fx - origin[0];
+      frame.y = fy - origin[1];
+
+      // Parent transform (position/rotation/scale) goes on the frame — NOT opacity, which
+      // AE parenting does not inherit. Static rotation/scale applied when not keyframed.
+      var tr = L.transform || {};
+      var kf = tr.keyframes || {};
+      if (tr.rotation != null && !(kf.rotation && kf.rotation.length)) frame.rotation = -tr.rotation[0];
+      try { applyKeyframes(frame, L, comp, ['position', 'rotation', 'scale']); }
+      catch (err) { motionOk = false; log('Motion skipped for "' + L.name + '": ' + (err && err.message || err)); }
+
+      // The parent's own visible content sits inside the frame (static; frame carries the
+      // transform). Its OPACITY stays here (opacity is per-layer, not inherited).
+      if (content) {
+        frame.appendChild(content);
+        content.x = cb[0] - fx;
+        content.y = cb[1] - fy;
+        var trOp = tr.opacity, animOp = kf.opacity && kf.opacity.length;
+        if (trOp != null && !animOp) content.opacity = clamp01(trOp[0] / 100);
+        try { applyKeyframes(content, L, comp, ['opacity']); } catch (e) {}
+      }
+
+      // Children nest inside the frame. Append highest AE index first so index 1 ends on top.
+      var kids = childrenOf[L.index].slice().sort(function (a, b) { return b.index - a.index; });
+      for (var i = 0; i < kids.length; i++) await build(kids[i], frame, [fx, fy]);
+    } else {
+      if (!content) return;
+      container.appendChild(content);
+      positionNode(content, L, comp, origin);
+      try { applyKeyframes(content, L, comp); }
+      catch (err) { motionOk = false; log('Motion skipped for "' + L.name + '": ' + (err && err.message || err)); }
     }
   }
+
+  // Root layers, highest AE index first so layer 1 renders on top.
+  var roots = rootLayers.slice().sort(function (a, b) { return b.index - a.index; });
+  for (var r = 0; r < roots.length; r++) await build(roots[r], root, [0, 0]);
 
   figma.currentPage.selection = [root];
   figma.viewport.scrollAndZoomIntoView([root]);
   figma.ui.postMessage({
     type: 'done',
-    text: 'Imported ' + entries.length + ' layers' + (motionOk ? '' : ' (static only — motion unavailable)')
+    text: 'Imported ' + count + ' layers' + (motionOk ? '' : ' (some motion unavailable)')
   });
 }
 
@@ -127,11 +166,28 @@ function createSolid(L) {
 }
 
 function createShape(L) {
-  // v1: bounding rectangle with first enabled fill/stroke + corner radius. Vectors deferred.
-  var node = figma.createRectangle();
   var s = L.shape || {};
   var size = s.size || [100, 100];
-  node.resize(Math.max(1, size[0]), Math.max(1, size[1]));
+  var w = Math.max(1, size[0]), h = Math.max(1, size[1]);
+  var kind = s.shapeKind || 'rect';
+
+  // Create the matching Figma primitive instead of always a rectangle.
+  var node;
+  if (kind === 'ellipse') {
+    node = figma.createEllipse();
+  } else if (kind === 'star') {
+    node = figma.createStar();
+    if (s.points) node.pointCount = Math.max(3, s.points);
+    if (s.innerRatio != null) node.innerRadius = clamp01(s.innerRatio);
+  } else if (kind === 'polygon') {
+    node = figma.createPolygon();
+    if (s.points) node.pointCount = Math.max(3, s.points);
+  } else {
+    // 'rect' or 'path' (freeform bezier falls back to a bounding rectangle for now)
+    node = figma.createRectangle();
+  }
+  node.resize(w, h);
+
   // Fill only if AE had an enabled fill — otherwise genuinely no fill (don't invent gray).
   node.fills = s.fill ? [paintFor(s.fill, L.name, 'fill')] : [];
   if (s.stroke) {
@@ -139,9 +195,9 @@ function createShape(L) {
     else if (s.stroke.color) node.strokes = [solidPaint(s.stroke.color)];
     if (s.stroke.width) node.strokeWeight = s.stroke.width;
   }
-  if (s.cornerRadius) {
-    // AE roundness is a corner radius in px; clamp to half the smaller side (Figma max).
-    node.cornerRadius = Math.min(s.cornerRadius, Math.min(size[0], size[1]) / 2);
+  // Corner radius applies to rectangles only.
+  if (s.cornerRadius && 'cornerRadius' in node) {
+    node.cornerRadius = Math.min(s.cornerRadius, Math.min(w, h) / 2);
   }
   return node;
 }
@@ -170,66 +226,63 @@ function createImage(L) {
 // is the node's top-left, so:
 //     topLeft = position + (sourceRect.topLeft - anchor) * scale
 // Order matters: resize for scale FIRST (changes width/height), then set x/y.
-function positionNode(node, L, comp) {
+// origin = comp-space top-left of the Figma container this node sits in ([0,0] for the
+// root frame). Positions are computed in comp space, then made container-relative.
+// `skipOpacity` when the caller (a parent wrapper) handles opacity elsewhere.
+function positionNode(node, L, comp, origin, skipOpacity) {
+  origin = origin || [0, 0];
   var tr = L.transform || {};
-  var posKeys = tr.keyframes && tr.keyframes.position;
-
-  // Fast path: comp-space bounds are the authoritative rendered top-left + size, in
-  // ABSOLUTE comp coordinates. Since layers flatten to the root frame (which sits at comp
-  // origin), this is correct even for parented layers — it captures the parent's transform
-  // contribution at t=0. Used when position isn't keyframed (compBounds is a t=0 snapshot).
-  var animOpacity = tr.keyframes && tr.keyframes.opacity && tr.keyframes.opacity.length;
-  if (L.compBounds && !(posKeys && posKeys.length)) {
-    var cb = L.compBounds; // [x, y, w, h] — axis-aligned rendered bbox, rotation baked in
-    if ('resize' in node) node.resize(Math.max(1, cb[2]), Math.max(1, cb[3]));
-    node.x = cb[0];
-    node.y = cb[1];
-    // Do NOT apply rotation here: compBounds already reflects the rendered (rotated) box.
-    // Re-rotating would double-count and tilt an otherwise-straight shape.
-    if (tr.opacity != null && !animOpacity) node.opacity = clamp01(tr.opacity[0] / 100);
-    return;
-  }
-
-  // Resting position must match the keyframe origin (first position keyframe), since
-  // the TRANSLATION track animates deltas from here. Falls back to the static value.
-  var pos = (posKeys && posKeys.length) ? posKeys[0].value : (tr.position || [0, 0]);
-  var anchor = tr.anchor || [0, 0];
-  var sr = L.sourceRect || [0, 0, node.width, node.height]; // [left, top, w, h]
   var kf = tr.keyframes || {};
-
-  // For an ANIMATED property, its motion track (built in applyKeyframes) animates
-  // relative to the node's NEUTRAL resting transform (Figma tracks are additive for
-  // translation/rotation, multiplicative for scale). So the static value must NOT also
-  // be applied — doing so double-counts (e.g. static rotation + rotation track = tilt).
-  // Only apply the static value when the property is NOT keyframed.
+  var posKeys = kf.position;
   var animScale = kf.scale && kf.scale.length;
   var animRot   = kf.rotation && kf.rotation.length;
   var animOp    = kf.opacity && kf.opacity.length;
+
+  // Fast path: comp-space bounds are the authoritative rendered top-left + size. Used
+  // when position isn't keyframed (compBounds is a t=0 snapshot). Made container-relative.
+  if (L.compBounds && !(posKeys && posKeys.length)) {
+    var cb = L.compBounds; // [x, y, w, h] — axis-aligned rendered bbox, rotation baked in
+    if ('resize' in node) node.resize(Math.max(1, cb[2]), Math.max(1, cb[3]));
+    node.x = cb[0] - origin[0];
+    node.y = cb[1] - origin[1];
+    // compBounds already reflects the rotated box; re-rotating would double-count.
+    if (tr.opacity != null && !animOp && !skipOpacity) node.opacity = clamp01(tr.opacity[0] / 100);
+    return;
+  }
+
+  // Animated-position resting = first position keyframe (the TRANSLATION track animates
+  // deltas from here). AE position is anchor-based; content top-left = pos + (sr - anchor).
+  var pos = (posKeys && posKeys.length) ? posKeys[0].value : (tr.position || [0, 0]);
+  var anchor = tr.anchor || [0, 0];
+  var sr = L.sourceRect || [0, 0, node.width, node.height]; // [left, top, w, h]
 
   var sx = 1, sy = 1;
   if (tr.scale && !animScale) {
     sx = tr.scale[0] / 100;
     sy = (tr.scale[1] != null ? tr.scale[1] : tr.scale[0]) / 100;
   }
-  // Scale by resizing the node (Figma grows from top-left; we compensate via x/y below).
   if ('resize' in node && sx > 0 && sy > 0) {
     node.resize(Math.max(1, sr[2] * sx), Math.max(1, sr[3] * sy));
   }
 
-  node.x = pos[0] + (sr[0] - anchor[0]) * sx;
-  node.y = pos[1] + (sr[1] - anchor[1]) * sy;
+  node.x = pos[0] + (sr[0] - anchor[0]) * sx - origin[0];
+  node.y = pos[1] + (sr[1] - anchor[1]) * sy - origin[1];
 
   if (tr.rotation != null && !animRot) node.rotation = -tr.rotation[0]; // AE cw+, Figma ccw+
-  if (tr.opacity != null && !animOp) node.opacity = clamp01(tr.opacity[0] / 100);
+  if (tr.opacity != null && !animOp && !skipOpacity) node.opacity = clamp01(tr.opacity[0] / 100);
 }
 
 // --- keyframes (Motion API, beta) ------------------------------------------
-function applyKeyframes(node, L, comp) {
+// `only` (optional array of AE prop names) restricts which tracks are applied — used to
+// put position/rotation/scale on a parent's wrapper frame while opacity stays on its
+// content node (AE parenting inherits transform but NOT opacity).
+function applyKeyframes(node, L, comp, only) {
   var kf = (L.transform && L.transform.keyframes) || {};
   if (!node.applyManualKeyframeTrack) return; // API not present -> static only
   var applied = false;
 
   for (var aeProp in MOTION_PROP) {
+    if (only && only.indexOf(aeProp) === -1) continue;
     var keys = kf[aeProp];
     if (!keys || keys.length < 2) continue;
     var fields = MOTION_PROP[aeProp];

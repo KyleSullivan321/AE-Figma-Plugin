@@ -37,7 +37,9 @@ They talk through one JSON file. No network, no install bridge.
 
 - **Layers:** text, shape (as bounding rect + first fill), solid, image (still footage)
 - **Transform:** position, scale, rotation, opacity, anchor
-- **Hierarchy:** parented layers land at their correct absolute position (see limits)
+- **Hierarchy:** AE parenting rebuilt as nested Figma frames — an animated parent
+  (e.g. a null-object rig) propagates its motion to children
+- **Shapes:** rectangle, ellipse, star, polygon (freeform paths → bounding box)
 - **Keyframes:** position / scale / rotation / opacity → Figma Motion tracks
 - **Easing:** AE keyframe ease → cubic-bezier (influence → control points); hold supported
 - **Images** are embedded base64 in the JSON and rebuilt as Figma image fills
@@ -50,10 +52,11 @@ They talk through one JSON file. No network, no install bridge.
 - **Text animators (per-char/word/line)** are not yet converted — text comes in static.
   Planned as its own pass (split text into per-unit nodes + staggered keyframes).
 - Video/image-sequence footage not handled (still images only).
-- **Parenting is flattened**: layers land at their correct absolute position, but the
-  parent-child link isn't rebuilt (Figma shapes can't contain children). An **animated
-  parent** (e.g. a null-object rig) does not propagate its motion to children — each child
-  animates from its correct start but won't follow the parent.
+- **Parenting**: rebuilt as nested frames (position/rotation/scale inherit; opacity is
+  per-layer, as in AE). Scale *inheritance* and non-center anchors on deep rigs are
+  approximate. Adjustment layers are skipped (they're transparent in AE).
+- Freeform (bezier) shape paths import as a bounding box; rect/ellipse/star/polygon
+  come through as real Figma shapes.
 - Effects, masks, blend modes, expressions, 3D, cameras/lights: not exported.
 - Easing is mapped coarsely (linear / hold / ease). Bezier control values are
   approximated.

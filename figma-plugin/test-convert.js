@@ -85,4 +85,43 @@ assert(mapEasing(null, null, 'HOLD', 1, 1).type==='HOLD', 'hold -> HOLD');
 
 // (Images now travel as sidecar files read natively by the UI — no base64 codec to test.)
 
+// --- nested parenting coordinate telescoping ---------------------------------
+// Mirror the build() math: a parent becomes a frame centered on its anchor; children
+// place relative to the container origin. Every node's ABSOLUTE comp position must equal
+// its compBounds top-left, no matter how deep the nesting.
+function simulate(layer, origin){
+  // returns list of {name, absX, absY, expectX, expectY}
+  var results = [];
+  function build(L, origin){
+    var cb = L.compBounds, w = cb[2], h = cb[3];
+    if (L.children && L.children.length){
+      var anchor = L.anchorComp;
+      var fx = anchor[0]-w/2, fy = anchor[1]-h/2;        // frame comp top-left
+      var frameRelX = fx - origin[0], frameRelY = fy - origin[1];
+      var frameAbsX = origin[0] + frameRelX, frameAbsY = origin[1] + frameRelY;
+      // parent content inside frame:
+      var contentAbsX = frameAbsX + (cb[0] - fx), contentAbsY = frameAbsY + (cb[1] - fy);
+      results.push({name:L.name, absX:contentAbsX, absY:contentAbsY, expectX:cb[0], expectY:cb[1]});
+      L.children.forEach(function(c){ build(c, [fx, fy]); });
+    } else {
+      var relX = cb[0] - origin[0], relY = cb[1] - origin[1];
+      results.push({name:L.name, absX:origin[0]+relX, absY:origin[1]+relY, expectX:cb[0], expectY:cb[1]});
+    }
+  }
+  build(layer, origin);
+  return results;
+}
+// 3-level rig: null(anim) -> shape1 -> shape2, each at distinct comp positions.
+var rig = {
+  name:'null', compBounds:[500,400,100,100], anchorComp:[550,450],
+  children:[{
+    name:'shape1', compBounds:[300,200,240,240], anchorComp:[420,320],
+    children:[{ name:'shape2', compBounds:[1000,-100,150,150], anchorComp:[1075,-25], children:[] }]
+  }]
+};
+simulate(rig,[0,0]).forEach(function(r){
+  assert(near(r.absX,r.expectX)&&near(r.absY,r.expectY),
+    'nested placement '+r.name+' abs('+r.absX+','+r.absY+') == compBounds('+r.expectX+','+r.expectY+')');
+});
+
 console.log('ok — all conversion checks passed');

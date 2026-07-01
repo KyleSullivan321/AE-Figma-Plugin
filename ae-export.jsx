@@ -194,9 +194,47 @@ function exportComp() {
             fill = paints.fill;                 // null if no fill or fill disabled
             var stroke = paints.stroke;         // {color, width} or null
             cornerRadius = firstRectRoundness(contents);
-            return { size: size, fill: fill, stroke: stroke, cornerRadius: cornerRadius };
+            var kind = firstShapeKind(contents);   // {type, points?, innerRatio?}
+            return { size: size, fill: fill, stroke: stroke, cornerRadius: cornerRadius,
+                     shapeKind: kind ? kind.type : "rect",
+                     points: kind ? kind.points : null,
+                     innerRatio: kind ? kind.innerRatio : null };
         } catch (e) {}
-        return { size: size, fill: fill, stroke: null, cornerRadius: cornerRadius };
+        return { size: size, fill: fill, stroke: null, cornerRadius: cornerRadius, shapeKind: "rect" };
+    }
+
+    // Detect the first shape PRIMITIVE so Figma can create the matching node type instead
+    // of always a rectangle. AE primitives: Rect, Ellipse, Star (star or polygon), and
+    // freeform bezier groups (fallback to a rect bounding box).
+    function firstShapeKind(group) {
+        if (!group) return null;
+        for (var i = 1; i <= group.numProperties; i++) {
+            var pr = group.property(i);
+            try {
+                if (pr.matchName === "ADBE Vector Shape - Rect") return { type: "rect" };
+                if (pr.matchName === "ADBE Vector Shape - Ellipse") return { type: "ellipse" };
+                if (pr.matchName === "ADBE Vector Shape - Star") {
+                    var isPolygon = false, pts = 5, inner = 0.5;
+                    try { isPolygon = (pr.property("ADBE Vector Star Type").value === 2); } catch (e) {}
+                    try { pts = Math.round(pr.property("ADBE Vector Star Points").value); } catch (e) {}
+                    try {
+                        var ir = pr.property("ADBE Vector Star Inner Radius").value;
+                        var or = pr.property("ADBE Vector Star Outer Radius").value;
+                        if (or) inner = round(ir / or);
+                    } catch (e) {}
+                    return { type: isPolygon ? "polygon" : "star", points: pts, innerRatio: inner };
+                }
+                // A freeform path (ADBE Vector Shape - Group) -> vector; fall back to rect bbox.
+                if (pr.matchName === "ADBE Vector Shape - Group") return { type: "path" };
+            } catch (e) {}
+            try {
+                if (pr.property("ADBE Vectors Group")) {
+                    var c = firstShapeKind(pr.property("ADBE Vectors Group"));
+                    if (c) return c;
+                }
+            } catch (e) {}
+        }
+        return null;
     }
 
     // Return the first ENABLED fill color and the first ENABLED stroke (color + width).
@@ -310,6 +348,11 @@ function exportComp() {
         var type = layerType(L);
         plog("layer " + i + " '" + L.name + "' type=" + type);
         if (type === "other") continue; // skip cameras, lights, adjustment-only, nulls-without-children for v1
+        // Adjustment layers are transparent in AE (they only apply effects to layers
+        // below). Rendering one as an opaque solid covers everything behind it. Skip.
+        var isAdjustment = false;
+        try { isAdjustment = L.adjustmentLayer; } catch (e) {}
+        if (isAdjustment) { plog("  skip adjustment layer"); continue; }
 
         // sourceRect = the layer's content bounds in its OWN coordinate space.
         // Critical for placement: AE's anchor/position are relative to this origin,
@@ -328,7 +371,10 @@ function exportComp() {
         // Map ALL FOUR content corners into comp space and take the bounding box, so
         // rotation/skew are handled. sourcePointToComp evaluates at the CURRENT comp time;
         // pin the playhead to 0 first so this matches the t=0 sourceRect and static import.
-        var compBounds = null;
+        // anchorComp = the layer's ANCHOR POINT in comp space at t=0. Used by the Figma
+        // side to center a parent's wrapper frame on the anchor, so frame rotation/scale
+        // pivots around the anchor (matching AE) and children inherit the parent's motion.
+        var compBounds = null, anchorComp = null;
         try {
             if (sr) {
                 var savedTime = comp.time;
@@ -339,12 +385,16 @@ function exportComp() {
                     L.sourcePointToComp([sr[0] + sr[2], sr[1] + sr[3]]),
                     L.sourcePointToComp([sr[0], sr[1] + sr[3]])
                 ];
+                var av = [0, 0];
+                try { var a = L.property("ADBE Transform Group").property("ADBE Anchor Point").value; av = [a[0], a[1]]; } catch (e) {}
+                var ac = L.sourcePointToComp(av);
                 comp.time = savedTime;
                 var xs = [cs[0][0], cs[1][0], cs[2][0], cs[3][0]];
                 var ys = [cs[0][1], cs[1][1], cs[2][1], cs[3][1]];
                 var minX = Math.min.apply(null, xs), minY = Math.min.apply(null, ys);
                 var maxX = Math.max.apply(null, xs), maxY = Math.max.apply(null, ys);
                 compBounds = [round(minX), round(minY), round(maxX - minX), round(maxY - minY)];
+                anchorComp = [round(ac[0]), round(ac[1])];
             }
         } catch (e) {}
 
@@ -355,8 +405,9 @@ function exportComp() {
             parentIndex: L.parent ? L.parent.index : null,
             inPoint: round(L.inPoint),
             outPoint: round(L.outPoint),
-            sourceRect: sr,        // [left, top, width, height] in layer space
-            compBounds: compBounds, // [x, y, w, h] rendered top-left + size in comp space
+            sourceRect: sr,          // [left, top, width, height] in layer space
+            compBounds: compBounds,  // [x, y, w, h] rendered top-left + size in comp space
+            anchorComp: anchorComp,  // [x, y] anchor point in comp space at t=0
             transform: transform(L)
         };
 
@@ -488,11 +539,10 @@ function exportComp() {
     var limits = [
         "• Text animators (per-char/word/line)",
         "• Gradient colors (imports as gray placeholder)",
-        "• Shape vector paths (exported as bounding box)",
+        "• Freeform vector paths (exported as bounding box)",
         "• Effects, masks, blend modes, expressions",
         "• 3D layers, cameras, lights",
-        "• Rotated static shapes (come in axis-aligned)",
-        "• Animated parents (null rigs): children don't follow"
+        "• Adjustment layers (skipped)"
     ];
     for (var i = 0; i < limits.length; i++) note.add("statictext", undefined, limits[i]);
 
