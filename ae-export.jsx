@@ -413,7 +413,7 @@ function exportComp() {
 (function (thisObj) {
     var win = (thisObj instanceof Panel)
         ? thisObj
-        : new Window("palette", "AE → Figma", undefined, { resizeable: true });
+        : new Window("palette", "AE to Figma Exporter", undefined, { resizeable: true });
 
     win.orientation = "column";
     win.alignChildren = ["fill", "top"];
