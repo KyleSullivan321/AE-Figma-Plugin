@@ -232,7 +232,9 @@ function exportComp() {
             var info = { size: size, fill: fill, stroke: stroke, cornerRadius: cornerRadius,
                          shapeKind: kindType,
                          points: kind ? kind.points : null,
-                         innerRatio: kind ? kind.innerRatio : null };
+                         innerRatio: kind ? kind.innerRatio : null,
+                         roundness: kind ? kind.roundness : null,       // star point roundness (0-100)
+                         outerRadius: kind ? kind.outerRadius : null };
             // Freeform bezier path -> export geometry + comp-space bounds (from the path,
             // NOT sourceRect, which is truncated when a Trim Paths modifier is mid-animation).
             if (kindType === "path") {
@@ -347,15 +349,17 @@ function exportComp() {
                 if (pr.matchName === "ADBE Vector Shape - Rect") return { type: "rect" };
                 if (pr.matchName === "ADBE Vector Shape - Ellipse") return { type: "ellipse" };
                 if (pr.matchName === "ADBE Vector Shape - Star") {
-                    var isPolygon = false, pts = 5, inner = 0.5;
+                    var isPolygon = false, pts = 5, inner = 0.5, outerRound = 0, outerR = 0;
                     try { isPolygon = (pr.property("ADBE Vector Star Type").value === 2); } catch (e) {}
                     try { pts = Math.round(pr.property("ADBE Vector Star Points").value); } catch (e) {}
                     try {
                         var ir = pr.property("ADBE Vector Star Inner Radius").value;
-                        var or = pr.property("ADBE Vector Star Outer Radius").value;
-                        if (or) inner = round(ir / or);
+                        outerR = pr.property("ADBE Vector Star Outer Radius").value;
+                        if (outerR) inner = round(ir / outerR);
                     } catch (e) {}
-                    return { type: isPolygon ? "polygon" : "star", points: pts, innerRatio: inner };
+                    try { outerRound = round(pr.property("ADBE Vector Star Outer Roundness").value); } catch (e) {}
+                    return { type: isPolygon ? "polygon" : "star", points: pts, innerRatio: inner,
+                             roundness: outerRound, outerRadius: round(outerR) };
                 }
                 // A freeform path (ADBE Vector Shape - Group) -> vector; fall back to rect bbox.
                 if (pr.matchName === "ADBE Vector Shape - Group") return { type: "path" };
@@ -514,6 +518,9 @@ function exportComp() {
     function layerType(layer) {
         if (layer instanceof TextLayer) return "text";
         if (layer instanceof ShapeLayer) return "shape";
+        // Null objects have a SolidSource but must NOT render (they're invisible rigs in AE).
+        // Detected before "solid" so they don't come across as white squares.
+        try { if (layer.nullLayer) return "null"; } catch (e) {}
         if (layer.source && layer.source.mainSource instanceof SolidSource) return "solid";
         // A layer whose source is another composition -> precomp (recurse into it).
         if (layer.source && (layer.source instanceof CompItem)) return "precomp";

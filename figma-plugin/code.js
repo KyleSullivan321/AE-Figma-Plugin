@@ -243,6 +243,8 @@ function makeShapeNode(s, size, name) {
     if (s.points) node.pointCount = Math.max(3, s.points);
     if (s.innerRatio != null) node.innerRadius = clamp01(s.innerRatio);
     node.resize(w, h);
+    // AE star point roundness (0-100%) -> Figma corner radius (px). Approximate.
+    if (s.roundness && 'cornerRadius' in node) node.cornerRadius = (s.roundness / 100) * Math.min(w, h) * 0.25;
   } else if (kind === 'polygon') {
     node = figma.createPolygon();
     if (s.points) node.pointCount = Math.max(3, s.points);
@@ -329,13 +331,17 @@ function positionNode(node, L, comp, origin, skipOpacity) {
   var animRot   = kf.rotation && kf.rotation.length;
   var animOp    = kf.opacity && kf.opacity.length;
 
-  // Fast path: comp-space bounds are the authoritative rendered top-left + size. Used
-  // when position isn't keyframed (compBounds is a t=0 snapshot). Made container-relative.
-  if (L.compBounds && !(posKeys && posKeys.length)) {
+  // Comp-space bounds are the authoritative rendered top-left + size (at t=0), in ABSOLUTE
+  // comp coords. Use them for RESTING position even when position is keyframed — the
+  // TRANSLATION track (applied separately) animates the delta from here. This is essential
+  // for a PARENTED animated layer: its posKeys are in AE parent-relative space, which
+  // clashes with the frame's comp-space origin; compBounds sidesteps that.
+  if (L.compBounds) {
     var cb = L.compBounds; // [x, y, w, h] — axis-aligned rendered bbox, rotation baked in
-    // Vectors auto-size to their path geometry; resizing would stretch the curve. The SVG
-    // is built with the same control-point origin as compBounds, so x/y placement aligns.
-    if ('resize' in node && node.type !== 'VECTOR') node.resize(Math.max(1, cb[2]), Math.max(1, cb[3]));
+    // Text/vector auto-size to their content/geometry; resizing would reflow or stretch them.
+    if ('resize' in node && node.type !== 'VECTOR' && node.type !== 'TEXT') {
+      node.resize(Math.max(1, cb[2]), Math.max(1, cb[3]));
+    }
     node.x = cb[0] - origin[0];
     node.y = cb[1] - origin[1];
     // compBounds already reflects the rotated box; re-rotating would double-count.
