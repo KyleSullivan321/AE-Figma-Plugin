@@ -126,12 +126,17 @@ function createSolid(L) {
 }
 
 function createShape(L) {
-  // v1: bounding rectangle with first fill + corner radius. Full vector paths deferred.
+  // v1: bounding rectangle with first enabled fill/stroke + corner radius. Vectors deferred.
   var node = figma.createRectangle();
   var s = L.shape || {};
   var size = s.size || [100, 100];
   node.resize(Math.max(1, size[0]), Math.max(1, size[1]));
-  node.fills = s.fill ? [solidPaint(s.fill)] : [solidPaint([0.8, 0.8, 0.8])];
+  // Fill only if AE had an enabled fill — otherwise genuinely no fill (don't invent gray).
+  node.fills = s.fill ? [solidPaint(s.fill)] : [];
+  if (s.stroke && s.stroke.color) {
+    node.strokes = [solidPaint(s.stroke.color)];
+    if (s.stroke.width) node.strokeWeight = s.stroke.width;
+  }
   if (s.cornerRadius) {
     // AE roundness is a corner radius in px; clamp to half the smaller side (Figma max).
     node.cornerRadius = Math.min(s.cornerRadius, Math.min(size[0], size[1]) / 2);

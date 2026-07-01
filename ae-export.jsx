@@ -185,30 +185,39 @@ function exportComp() {
         } catch (e) {}
         try {
             var contents = layer.property("ADBE Root Vectors Group");
-            fill = firstFillColor(contents);
+            var paints = firstPaints(contents);
+            fill = paints.fill;                 // null if no fill or fill disabled
+            var stroke = paints.stroke;         // {color, width} or null
             cornerRadius = firstRectRoundness(contents);
+            return { size: size, fill: fill, stroke: stroke, cornerRadius: cornerRadius };
         } catch (e) {}
-        return { size: size, fill: fill, cornerRadius: cornerRadius };
+        return { size: size, fill: fill, stroke: null, cornerRadius: cornerRadius };
     }
 
-    function firstFillColor(group) {
-        if (!group) return null;
-        for (var i = 1; i <= group.numProperties; i++) {
-            var pr = group.property(i);
-            try {
-                if (pr.matchName === "ADBE Vector Graphic - Fill") {
-                    return color(pr.property("ADBE Vector Fill Color").value);
-                }
-            } catch (e) {}
-            // recurse into vector groups
-            try {
-                if (pr.property("ADBE Vectors Group")) {
-                    var c = firstFillColor(pr.property("ADBE Vectors Group"));
-                    if (c) return c;
-                }
-            } catch (e) {}
+    // Return the first ENABLED fill color and the first ENABLED stroke (color + width).
+    // A disabled paint (the eyeball off / "no fill") must NOT be exported — AE keeps the
+    // color value even when the paint is off, so we gate on `enabled`.
+    function firstPaints(group) {
+        var result = { fill: null, stroke: null };
+        function walk(g) {
+            if (!g) return;
+            for (var i = 1; i <= g.numProperties; i++) {
+                var pr = g.property(i);
+                try {
+                    if (pr.matchName === "ADBE Vector Graphic - Fill" && result.fill === null && pr.enabled) {
+                        result.fill = color(pr.property("ADBE Vector Fill Color").value);
+                    } else if (pr.matchName === "ADBE Vector Graphic - Stroke" && result.stroke === null && pr.enabled) {
+                        result.stroke = {
+                            color: color(pr.property("ADBE Vector Stroke Color").value),
+                            width: round(pr.property("ADBE Vector Stroke Width").value)
+                        };
+                    }
+                } catch (e) {}
+                try { if (pr.property("ADBE Vectors Group")) walk(pr.property("ADBE Vectors Group")); } catch (e) {}
+            }
         }
-        return null;
+        walk(group);
+        return result;
     }
 
     // Find the first rectangle's corner roundness (AE "Rectangle Path > Roundness").
