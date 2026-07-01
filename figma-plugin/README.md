@@ -39,7 +39,8 @@ They talk through one JSON file. No network, no install bridge.
 - **Transform:** position, scale, rotation, opacity, anchor
 - **Hierarchy:** AE parenting rebuilt as nested Figma frames — an animated parent
   (e.g. a null-object rig) propagates its motion to children
-- **Shapes:** rectangle, ellipse, star, polygon (freeform paths → bounding box)
+- **Shapes:** rectangle, ellipse, star, polygon, and freeform bezier paths (real vectors)
+- **Trim Paths:** the write-on / draw-on animation → Figma `PATH_TRIM_START/END`
 - **Keyframes:** position / scale / rotation / opacity → Figma Motion tracks
 - **Easing:** AE keyframe ease → cubic-bezier (influence → control points); hold supported
 - **Images** are embedded base64 in the JSON and rebuilt as Figma image fills
@@ -55,8 +56,9 @@ They talk through one JSON file. No network, no install bridge.
 - **Parenting**: rebuilt as nested frames (position/rotation/scale inherit; opacity is
   per-layer, as in AE). Scale *inheritance* and non-center anchors on deep rigs are
   approximate. Adjustment layers are skipped (they're transparent in AE).
-- Freeform (bezier) shape paths import as a bounding box; rect/ellipse/star/polygon
-  come through as real Figma shapes.
+- Freeform bezier paths import as real Figma vectors. **Path morph** (vertices animating
+  over time) is not reproduced — Figma has no vector-geometry keyframe track. **Trim Paths**
+  (write-on) is supported. Scaled/rotated vector layers are approximate.
 - Effects, masks, blend modes, expressions, 3D, cameras/lights: not exported.
 - Easing is mapped coarsely (linear / hold / ease). Bezier control values are
   approximated.

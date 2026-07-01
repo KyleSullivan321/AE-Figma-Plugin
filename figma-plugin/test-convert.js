@@ -124,4 +124,38 @@ simulate(rig,[0,0]).forEach(function(r){
     'nested placement '+r.name+' abs('+r.absX+','+r.absY+') == compBounds('+r.expectX+','+r.expectY+')');
 });
 
+// --- AE bezier path -> SVG (mirror of buildSvgPath) --------------------------
+function buildSvgPath(path){
+  var V=path.verts, IN=path.inTan, OUT=path.outTan, n=V.length;
+  var xs=[], ys=[];
+  for(var i=0;i<n;i++){ xs.push(V[i][0],V[i][0]+IN[i][0],V[i][0]+OUT[i][0]); ys.push(V[i][1],V[i][1]+IN[i][1],V[i][1]+OUT[i][1]); }
+  var minX=Math.min.apply(null,xs), minY=Math.min.apply(null,ys), maxX=Math.max.apply(null,xs), maxY=Math.max.apply(null,ys);
+  function px(x){return (x-minX).toFixed(3);} function py(y){return (y-minY).toFixed(3);}
+  function seg(a,b){ var c1x=V[a][0]+OUT[a][0],c1y=V[a][1]+OUT[a][1],c2x=V[b][0]+IN[b][0],c2y=V[b][1]+IN[b][1];
+    return 'C '+px(c1x)+' '+py(c1y)+' '+px(c2x)+' '+py(c2y)+' '+px(V[b][0])+' '+py(V[b][1])+' '; }
+  var d='M '+px(V[0][0])+' '+py(V[0][1])+' ';
+  for(var k=0;k<n-1;k++) d+=seg(k,k+1);
+  if(path.closed){ d+=seg(n-1,0); d+='Z'; }
+  return {d:d, w:maxX-minX, h:maxY-minY};
+}
+// Real 2-vertex open path from diag-path.txt.
+var realPath = {
+  closed:false,
+  verts:[[-389.965,386.659],[363.470,-487.457]],
+  inTan:[[-184.282,0],[-595.247,0]],
+  outTan:[[184.282,0],[595.247,0]]
+};
+var svg = buildSvgPath(realPath);
+assert(svg.d.indexOf('M ')===0, 'svg starts with moveto');
+assert(svg.d.indexOf('C ')>0, 'svg has a cubic segment');
+assert(svg.d.indexOf('Z')===-1, 'open path has no Z');
+// All emitted coords must be >= 0 (offset by bbox min).
+var nums = svg.d.replace(/[MCZ]/g,'').trim().split(/\s+/).map(Number);
+assert(nums.every(function(v){ return v >= -1e-6; }), 'all svg coords offset non-negative');
+// Closed path gets a Z.
+var closed = buildSvgPath({closed:true, verts:[[0,0],[100,0],[100,100]], inTan:[[0,0],[0,0],[0,0]], outTan:[[0,0],[0,0],[0,0]]});
+assert(closed.d.indexOf('Z')>0, 'closed path ends with Z');
+// Trim %->0-1 mapping.
+assert(near(2/100,0.02) && near(100/100,1.0), 'trim percent to 0-1');
+
 console.log('ok — all conversion checks passed');

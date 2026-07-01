@@ -55,7 +55,12 @@ async function importComp(data) {
   var layerByIndex = {};
   var childrenOf = {}; // parentIndex -> [layer]
   var rootLayers = [];
-  data.layers.forEach(function (L) { layerByIndex[L.index] = L; });
+  data.layers.forEach(function (L) {
+    layerByIndex[L.index] = L;
+    // For a freeform path, the real bounds come from the path geometry, not sourceRect
+    // (which a mid-animation Trim Paths modifier truncates). Use the path-derived bounds.
+    if (L.shape && L.shape.pathBoundsComp) L.compBounds = L.shape.pathBoundsComp;
+  });
   data.layers.forEach(function (L) {
     if (L.parentIndex != null && layerByIndex[L.parentIndex]) {
       (childrenOf[L.parentIndex] = childrenOf[L.parentIndex] || []).push(L);
@@ -108,6 +113,7 @@ async function importComp(data) {
         var trOp = tr.opacity, animOp = kf.opacity && kf.opacity.length;
         if (trOp != null && !animOp) content.opacity = clamp01(trOp[0] / 100);
         try { applyKeyframes(content, L, comp, ['opacity']); } catch (e) {}
+        applyTrim(content, L, comp);
       }
 
       // Children nest inside the frame. Append highest AE index first so index 1 ends on top.
@@ -119,6 +125,7 @@ async function importComp(data) {
       positionNode(content, L, comp, origin);
       try { applyKeyframes(content, L, comp); }
       catch (err) { motionOk = false; log('Motion skipped for "' + L.name + '": ' + (err && err.message || err)); }
+      applyTrim(content, L, comp);
     }
   }
 
@@ -172,21 +179,29 @@ function createShape(L) {
   var kind = s.shapeKind || 'rect';
 
   // Create the matching Figma primitive instead of always a rectangle.
-  var node;
+  var node, isVector = false;
   if (kind === 'ellipse') {
     node = figma.createEllipse();
+    node.resize(w, h);
   } else if (kind === 'star') {
     node = figma.createStar();
     if (s.points) node.pointCount = Math.max(3, s.points);
     if (s.innerRatio != null) node.innerRadius = clamp01(s.innerRatio);
+    node.resize(w, h);
   } else if (kind === 'polygon') {
     node = figma.createPolygon();
     if (s.points) node.pointCount = Math.max(3, s.points);
+    node.resize(w, h);
+  } else if (kind === 'path' && s.path && s.path.verts && s.path.verts.length >= 2) {
+    // Freeform bezier -> real Figma vector built from the AE path data.
+    node = figma.createVector();
+    var svg = buildSvgPath(s.path);
+    node.vectorPaths = [{ windingRule: 'NONZERO', data: svg.d }];
+    // node auto-sizes to the geometry; no resize (keeps natural path proportions).
   } else {
-    // 'rect' or 'path' (freeform bezier falls back to a bounding rectangle for now)
     node = figma.createRectangle();
+    node.resize(w, h);
   }
-  node.resize(w, h);
 
   // Fill only if AE had an enabled fill — otherwise genuinely no fill (don't invent gray).
   node.fills = s.fill ? [paintFor(s.fill, L.name, 'fill')] : [];
@@ -195,11 +210,38 @@ function createShape(L) {
     else if (s.stroke.color) node.strokes = [solidPaint(s.stroke.color)];
     if (s.stroke.width) node.strokeWeight = s.stroke.width;
   }
-  // Corner radius applies to rectangles only.
   if (s.cornerRadius && 'cornerRadius' in node) {
     node.cornerRadius = Math.min(s.cornerRadius, Math.min(w, h) / 2);
   }
   return node;
+}
+
+// AE bezier path -> SVG path string, offset so the bounding box starts at (0,0). AE
+// tangents are relative to their vertex; a cubic segment's control points are
+// vertex+outTangent (leaving) and nextVertex+inTangent (arriving). AE and SVG both use
+// y-down, so no axis flip. Returns { d, w, h }.
+function buildSvgPath(path) {
+  var V = path.verts, IN = path.inTan, OUT = path.outTan, n = V.length;
+  // bbox over vertices and their control points
+  var xs = [], ys = [];
+  for (var i = 0; i < n; i++) {
+    xs.push(V[i][0], V[i][0] + IN[i][0], V[i][0] + OUT[i][0]);
+    ys.push(V[i][1], V[i][1] + IN[i][1], V[i][1] + OUT[i][1]);
+  }
+  var minX = Math.min.apply(null, xs), minY = Math.min.apply(null, ys);
+  var maxX = Math.max.apply(null, xs), maxY = Math.max.apply(null, ys);
+  function px(x) { return (x - minX).toFixed(3); }
+  function py(y) { return (y - minY).toFixed(3); }
+  function seg(a, b) {
+    // cubic from vertex a to vertex b
+    var c1x = V[a][0] + OUT[a][0], c1y = V[a][1] + OUT[a][1];
+    var c2x = V[b][0] + IN[b][0], c2y = V[b][1] + IN[b][1];
+    return 'C ' + px(c1x) + ' ' + py(c1y) + ' ' + px(c2x) + ' ' + py(c2y) + ' ' + px(V[b][0]) + ' ' + py(V[b][1]) + ' ';
+  }
+  var d = 'M ' + px(V[0][0]) + ' ' + py(V[0][1]) + ' ';
+  for (var k = 0; k < n - 1; k++) d += seg(k, k + 1);
+  if (path.closed) { d += seg(n - 1, 0); d += 'Z'; }
+  return { d: d, w: maxX - minX, h: maxY - minY };
 }
 
 function createImage(L) {
@@ -242,7 +284,9 @@ function positionNode(node, L, comp, origin, skipOpacity) {
   // when position isn't keyframed (compBounds is a t=0 snapshot). Made container-relative.
   if (L.compBounds && !(posKeys && posKeys.length)) {
     var cb = L.compBounds; // [x, y, w, h] — axis-aligned rendered bbox, rotation baked in
-    if ('resize' in node) node.resize(Math.max(1, cb[2]), Math.max(1, cb[3]));
+    // Vectors auto-size to their path geometry; resizing would stretch the curve. The SVG
+    // is built with the same control-point origin as compBounds, so x/y placement aligns.
+    if ('resize' in node && node.type !== 'VECTOR') node.resize(Math.max(1, cb[2]), Math.max(1, cb[3]));
     node.x = cb[0] - origin[0];
     node.y = cb[1] - origin[1];
     // compBounds already reflects the rotated box; re-rotating would double-count.
@@ -296,6 +340,44 @@ function applyKeyframes(node, L, comp, only) {
 
   // setTimelineDuration(timelineId, seconds): the timeline lives on the containing
   // top-level frame and is read from node.timelines. Extend only — never shorten.
+  if (applied && node.setTimelineDuration && node.timelines && node.timelines.length) {
+    var tl = node.timelines[0];
+    if (tl && tl.duration < comp.duration) node.setTimelineDuration(tl.id, comp.duration);
+  }
+}
+
+// AE Trim Paths -> Figma PATH_TRIM_START/END (0-1). AE trim is 0-100 %. Applies the
+// static value and, if keyframed, a manual track (the "write-on" / draw-on animation).
+function applyTrim(node, L, comp) {
+  var trim = L.shape && L.shape.trim;
+  if (!trim || !node.applyManualKeyframeTrack) return;
+
+  var axes = [
+    { field: 'PATH_TRIM_START', keys: trim.startKeys, val: trim.start },
+    { field: 'PATH_TRIM_END', keys: trim.endKeys, val: trim.end }
+  ];
+  var applied = false;
+  for (var i = 0; i < axes.length; i++) {
+    var a = axes[i];
+    if (a.keys && a.keys.length >= 2) {
+      var frames = [];
+      for (var k = 0; k < a.keys.length; k++) {
+        var key = a.keys[k];
+        var f = { timelinePosition: key.t, value: { type: 'FLOAT', value: clamp01(key.value[0] / 100) } };
+        if (k > 0) {
+          var v0 = a.keys[k - 1].value[0] / 100, v1 = key.value[0] / 100;
+          var e = mapEasing(axisEase(a.keys[k - 1].easeOut, 0), axisEase(key.easeIn, 0), key.interp, key.t - a.keys[k - 1].t, v1 - v0);
+          if (e) f.easing = e;
+        }
+        frames.push(f);
+      }
+      try {
+        node.applyManualKeyframeTrack({ type: 'PROPERTY', name: a.field },
+          { baseValue: { type: 'FLOAT', value: clamp01(a.keys[0].value[0] / 100) }, keyframes: frames });
+        applied = true;
+      } catch (e) { /* field unsupported on this node type */ }
+    }
+  }
   if (applied && node.setTimelineDuration && node.timelines && node.timelines.length) {
     var tl = node.timelines[0];
     if (tl && tl.duration < comp.duration) node.setTimelineDuration(tl.id, comp.duration);

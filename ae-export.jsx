@@ -195,10 +195,19 @@ function exportComp() {
             var stroke = paints.stroke;         // {color, width} or null
             cornerRadius = firstRectRoundness(contents);
             var kind = firstShapeKind(contents);   // {type, points?, innerRatio?}
-            return { size: size, fill: fill, stroke: stroke, cornerRadius: cornerRadius,
-                     shapeKind: kind ? kind.type : "rect",
-                     points: kind ? kind.points : null,
-                     innerRatio: kind ? kind.innerRatio : null };
+            var kindType = kind ? kind.type : "rect";
+            var info = { size: size, fill: fill, stroke: stroke, cornerRadius: cornerRadius,
+                         shapeKind: kindType,
+                         points: kind ? kind.points : null,
+                         innerRatio: kind ? kind.innerRatio : null };
+            // Freeform bezier path -> export geometry + comp-space bounds (from the path,
+            // NOT sourceRect, which is truncated when a Trim Paths modifier is mid-animation).
+            if (kindType === "path") {
+                info.path = extractPath(contents);
+                info.pathBoundsComp = pathBoundsComp(layer, info.path);
+            }
+            info.trim = extractTrim(contents); // {start,end,offset} incl. keyframes, or null
+            return info;
         } catch (e) {}
         return { size: size, fill: fill, stroke: null, cornerRadius: cornerRadius, shapeKind: "rect" };
     }
@@ -235,6 +244,74 @@ function exportComp() {
             } catch (e) {}
         }
         return null;
+    }
+
+    // Extract the first freeform bezier path: {closed, verts, inTan, outTan} in LAYER space.
+    // The path property "ADBE Vector Shape" lives inside a Path container ("ADBE Vector
+    // Shape - Group"), so we recurse into both that and normal contents groups.
+    function extractPath(group) {
+        if (!group) return null;
+        for (var i = 1; i <= group.numProperties; i++) {
+            var pr = group.property(i);
+            try {
+                if (pr.matchName === "ADBE Vector Shape") {
+                    var sh = pr.value;
+                    var verts = [], inTan = [], outTan = [];
+                    for (var v = 0; v < sh.vertices.length; v++) {
+                        verts.push([round(sh.vertices[v][0]), round(sh.vertices[v][1])]);
+                        inTan.push([round(sh.inTangents[v][0]), round(sh.inTangents[v][1])]);
+                        outTan.push([round(sh.outTangents[v][0]), round(sh.outTangents[v][1])]);
+                    }
+                    return { closed: sh.closed, verts: verts, inTan: inTan, outTan: outTan };
+                }
+            } catch (e) {}
+            try { if (pr.property("ADBE Vectors Group")) { var a = extractPath(pr.property("ADBE Vectors Group")); if (a) return a; } } catch (e) {}
+            if (pr.matchName === "ADBE Vector Shape - Group") { try { var b = extractPath(pr); if (b) return b; } catch (e) {} }
+        }
+        return null;
+    }
+
+    // Extract the first Trim Paths modifier: start/end/offset (0-100 %) with keyframes.
+    function extractTrim(group) {
+        if (!group) return null;
+        for (var i = 1; i <= group.numProperties; i++) {
+            var pr = group.property(i);
+            try {
+                if (pr.matchName === "ADBE Vector Filter - Trim") {
+                    function tp(nm) { try { return pr.property(nm); } catch (e) { return null; } }
+                    var s = tp("ADBE Vector Trim Start"), en = tp("ADBE Vector Trim End"), of = tp("ADBE Vector Trim Offset");
+                    return {
+                        start: s ? round(s.value) : 0, startKeys: keyframes(s),
+                        end: en ? round(en.value) : 100, endKeys: keyframes(en),
+                        offset: of ? round(of.value) : 0
+                    };
+                }
+            } catch (e) {}
+            try { if (pr.property("ADBE Vectors Group")) { var t = extractTrim(pr.property("ADBE Vectors Group")); if (t) return t; } } catch (e) {}
+        }
+        return null;
+    }
+
+    // Comp-space bounding box of a path, from mapping its control points through the layer
+    // transform (pinned at t=0). Avoids the Trim-truncated sourceRect. Returns [x,y,w,h].
+    function pathBoundsComp(layer, path) {
+        if (!path || !path.verts.length) return null;
+        try {
+            var savedTime = comp.time; comp.time = 0;
+            var xs = [], ys = [];
+            for (var i = 0; i < path.verts.length; i++) {
+                var v = path.verts[i];
+                var pts = [v, [v[0] + path.inTan[i][0], v[1] + path.inTan[i][1]], [v[0] + path.outTan[i][0], v[1] + path.outTan[i][1]]];
+                for (var p = 0; p < pts.length; p++) {
+                    var c = layer.sourcePointToComp(pts[p]);
+                    xs.push(c[0]); ys.push(c[1]);
+                }
+            }
+            comp.time = savedTime;
+            var minX = Math.min.apply(null, xs), minY = Math.min.apply(null, ys);
+            var maxX = Math.max.apply(null, xs), maxY = Math.max.apply(null, ys);
+            return [round(minX), round(minY), round(maxX - minX), round(maxY - minY)];
+        } catch (e) { return null; }
     }
 
     // Return the first ENABLED fill color and the first ENABLED stroke (color + width).
@@ -539,7 +616,7 @@ function exportComp() {
     var limits = [
         "• Text animators (per-char/word/line)",
         "• Gradient colors (imports as gray placeholder)",
-        "• Freeform vector paths (exported as bounding box)",
+        "• Path morph animation (trim/write-on IS supported)",
         "• Effects, masks, blend modes, expressions",
         "• 3D layers, cameras, lights",
         "• Adjustment layers (skipped)"
