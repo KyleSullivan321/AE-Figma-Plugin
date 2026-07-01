@@ -45,6 +45,8 @@ They talk through one JSON file. No network, no install bridge.
 ## Known limits
 
 - Shapes export as a filled bounding rectangle, not full vector paths.
+- **Gradient fills/strokes**: AE doesn't expose gradient color stops to scripting, so
+  gradients import as a gray placeholder in the correct orientation — recolor in Figma.
 - **Text animators (per-char/word/line)** are not yet converted — text comes in static.
   Planned as its own pass (split text into per-unit nodes + staggered keyframes).
 - Video/image-sequence footage not handled (still images only).

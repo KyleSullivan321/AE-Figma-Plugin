@@ -132,9 +132,10 @@ function createShape(L) {
   var size = s.size || [100, 100];
   node.resize(Math.max(1, size[0]), Math.max(1, size[1]));
   // Fill only if AE had an enabled fill — otherwise genuinely no fill (don't invent gray).
-  node.fills = s.fill ? [solidPaint(s.fill)] : [];
-  if (s.stroke && s.stroke.color) {
-    node.strokes = [solidPaint(s.stroke.color)];
+  node.fills = s.fill ? [paintFor(s.fill, L.name, 'fill')] : [];
+  if (s.stroke) {
+    if (s.stroke.gradient) node.strokes = [paintFor(s.stroke, L.name, 'stroke')];
+    else if (s.stroke.color) node.strokes = [solidPaint(s.stroke.color)];
     if (s.stroke.width) node.strokeWeight = s.stroke.width;
   }
   if (s.cornerRadius) {
@@ -170,9 +171,24 @@ function createImage(L) {
 // Order matters: resize for scale FIRST (changes width/height), then set x/y.
 function positionNode(node, L, comp) {
   var tr = L.transform || {};
+  var posKeys = tr.keyframes && tr.keyframes.position;
+
+  // Fast path: comp-space bounds are the authoritative rendered top-left + size. Use them
+  // for a STATIC, TOP-LEVEL layer (comp space == frame space when unparented). Sidesteps
+  // the anchor/sourceRect math and the unreadable rect-path offset. Not used when animated
+  // (compBounds is only a t=0 snapshot) or parented (would need parent-relative conversion).
+  if (L.compBounds && !(posKeys && posKeys.length) && L.parentIndex == null) {
+    var cb = L.compBounds; // [x, y, w, h]
+    if ('resize' in node) node.resize(Math.max(1, cb[2]), Math.max(1, cb[3]));
+    node.x = cb[0];
+    node.y = cb[1];
+    if (tr.rotation != null) node.rotation = -tr.rotation[0];
+    if (tr.opacity != null) node.opacity = clamp01(tr.opacity[0] / 100);
+    return;
+  }
+
   // Resting position must match the keyframe origin (first position keyframe), since
   // the TRANSLATION track animates deltas from here. Falls back to the static value.
-  var posKeys = tr.keyframes && tr.keyframes.position;
   var pos = (posKeys && posKeys.length) ? posKeys[0].value : (tr.position || [0, 0]);
   var anchor = tr.anchor || [0, 0];
   var sr = L.sourceRect || [0, 0, node.width, node.height]; // [left, top, w, h]
@@ -311,6 +327,34 @@ function mapEasing(outE, inE, interp, dt, dv) {
 
 function solidPaint(rgb) {
   return { type: 'SOLID', color: { r: clamp01(rgb[0]), g: clamp01(rgb[1]), b: clamp01(rgb[2]) } };
+}
+
+// Solid -> SOLID paint. Gradient -> a placeholder gradient in the right orientation.
+// AE gradient color stops are unreadable via scripting (NO_VALUE), so we can't port the
+// real colors — we render a visible gray->transparent gradient so the shape isn't blank
+// and the orientation matches, then log it once so the user knows to recolor by hand.
+var _gradientWarned = false;
+function paintFor(paint, layerName, which) {
+  if (!paint || !paint.gradient) return solidPaint(paint);
+  if (!_gradientWarned) {
+    log('Gradient colors cannot be read from AE (API limit) - imported as a gray placeholder. Recolor in Figma.');
+    _gradientWarned = true;
+  }
+  var start = paint.start || [0, 0];
+  var end = paint.end || [100, 0];
+  // Build a gradientTransform from the AE start->end vector, normalized to 0..1 UV space.
+  // AE points are in shape-local px; direction is what matters for orientation.
+  var dx = end[0] - start[0], dy = end[1] - start[1];
+  var len = Math.sqrt(dx * dx + dy * dy) || 1;
+  var ux = dx / len, uy = dy / len;
+  // Map a unit vector to Figma's 2x3 gradientTransform (rotation only; placeholder).
+  var transform = [[ux, uy, 0], [-uy, ux, 0]];
+  var stops = [
+    { position: 0, color: { r: 0.6, g: 0.6, b: 0.6, a: 1 } },
+    { position: 1, color: { r: 0.3, g: 0.3, b: 0.3, a: 1 } }
+  ];
+  var type = (paint.gradType === 2) ? 'GRADIENT_RADIAL' : 'GRADIENT_LINEAR';
+  return { type: type, gradientTransform: transform, gradientStops: stops };
 }
 
 async function loadFontSafe(family) {

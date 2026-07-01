@@ -197,6 +197,18 @@ function exportComp() {
     // Return the first ENABLED fill color and the first ENABLED stroke (color + width).
     // A disabled paint (the eyeball off / "no fill") must NOT be exported — AE keeps the
     // color value even when the paint is off, so we gate on `enabled`.
+    // Gradient LIMITATION: AE's "ADBE Vector Grad Colors" is PropertyValueType.NO_VALUE -
+    // the color stops are not exposed to scripting. So for gradients we export GEOMETRY
+    // (linear/radial + start/end points) with a flag; the Figma side renders a visible
+    // placeholder gradient in the right orientation and logs that colors can't be ported.
+    function gradInfo(pr) {
+        var g = { gradient: true };
+        try { g.gradType = pr.property("ADBE Vector Grad Type").value; } catch (e) {} // 1=linear 2=radial
+        try { var s = pr.property("ADBE Vector Grad Start Pt").value; g.start = [round(s[0]), round(s[1])]; } catch (e) {}
+        try { var en = pr.property("ADBE Vector Grad End Pt").value; g.end = [round(en[0]), round(en[1])]; } catch (e) {}
+        return g;
+    }
+
     function firstPaints(group) {
         var result = { fill: null, stroke: null };
         function walk(g) {
@@ -204,13 +216,20 @@ function exportComp() {
             for (var i = 1; i <= g.numProperties; i++) {
                 var pr = g.property(i);
                 try {
-                    if (pr.matchName === "ADBE Vector Graphic - Fill" && result.fill === null && pr.enabled) {
+                    var mn = pr.matchName;
+                    if (mn === "ADBE Vector Graphic - Fill" && result.fill === null && pr.enabled) {
                         result.fill = color(pr.property("ADBE Vector Fill Color").value);
-                    } else if (pr.matchName === "ADBE Vector Graphic - Stroke" && result.stroke === null && pr.enabled) {
+                    } else if (mn === "ADBE Vector Graphic - G-Fill" && result.fill === null && pr.enabled) {
+                        result.fill = gradInfo(pr);
+                    } else if (mn === "ADBE Vector Graphic - Stroke" && result.stroke === null && pr.enabled) {
                         result.stroke = {
                             color: color(pr.property("ADBE Vector Stroke Color").value),
                             width: round(pr.property("ADBE Vector Stroke Width").value)
                         };
+                    } else if (mn === "ADBE Vector Graphic - G-Stroke" && result.stroke === null && pr.enabled) {
+                        var gs = gradInfo(pr);
+                        try { gs.width = round(pr.property("ADBE Vector Stroke Width").value); } catch (e) {}
+                        result.stroke = gs;
                     }
                 } catch (e) {}
                 try { if (pr.property("ADBE Vectors Group")) walk(pr.property("ADBE Vectors Group")); } catch (e) {}
@@ -296,6 +315,23 @@ function exportComp() {
             sr = [round(r.left), round(r.top), round(r.width), round(r.height)];
         } catch (e) {}
 
+        // Comp-space bounds: the layer's rendered top-left + size in COMPOSITION pixels,
+        // computed by mapping the layer-space content corners through the transform. This
+        // is the authoritative placement — it captures offsets that live in unreadable
+        // (NO_VALUE) rect-path Position props, where the layer transform alone is ambiguous
+        // (multiple shapes can share one transform yet render in different places).
+        var compBounds = null;
+        try {
+            if (sr) {
+                var tl = L.sourcePointToComp([sr[0], sr[1]]);
+                var br = L.sourcePointToComp([sr[0] + sr[2], sr[1] + sr[3]]);
+                compBounds = [
+                    round(Math.min(tl[0], br[0])), round(Math.min(tl[1], br[1])),
+                    round(Math.abs(br[0] - tl[0])), round(Math.abs(br[1] - tl[1]))
+                ];
+            }
+        } catch (e) {}
+
         var entry = {
             index: L.index,
             name: L.name,
@@ -303,7 +339,8 @@ function exportComp() {
             parentIndex: L.parent ? L.parent.index : null,
             inPoint: round(L.inPoint),
             outPoint: round(L.outPoint),
-            sourceRect: sr, // [left, top, width, height] in layer space
+            sourceRect: sr,        // [left, top, width, height] in layer space
+            compBounds: compBounds, // [x, y, w, h] rendered top-left + size in comp space
             transform: transform(L)
         };
 
