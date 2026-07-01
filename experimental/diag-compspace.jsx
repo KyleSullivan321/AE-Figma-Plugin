@@ -15,13 +15,26 @@
         var r;
         try { r = L.sourceRectAtTime(0, false); w("  sourceRect(L): top="+r.top+" left="+r.left+" w="+r.width+" h="+r.height); }
         catch(e){ w("  sourceRect ERR "+es(e)); continue; }
-        // Map the rect's top-left (layer space) into comp space.
-        // sourcePointToComp takes a [x,y] in layer coordinates.
+        // rotation + position for context
         try {
-            var tl = L.sourcePointToComp([r.left, r.top]);
-            var br = L.sourcePointToComp([r.left + r.width, r.top + r.height]);
-            w("  compSpace TL: [" + tl[0] + ", " + tl[1] + "]");
-            w("  compSpace BR: [" + br[0] + ", " + br[1] + "]");
+            var tg = L.property("ADBE Transform Group");
+            w("  rotation: " + tg.property("ADBE Rotate Z").value);
+            w("  position: " + tg.property("ADBE Position").value);
+            w("  anchor: " + tg.property("ADBE Anchor Point").value);
+        } catch(e){ w("  transform read ERR " + es(e)); }
+        // Map ALL FOUR corners into comp space (rotation-safe bounding box).
+        try {
+            var c = [
+                L.sourcePointToComp([r.left, r.top]),
+                L.sourcePointToComp([r.left + r.width, r.top]),
+                L.sourcePointToComp([r.left + r.width, r.top + r.height]),
+                L.sourcePointToComp([r.left, r.top + r.height])
+            ];
+            for (var k = 0; k < 4; k++) w("  corner" + k + ": [" + c[k][0].toFixed(1) + ", " + c[k][1].toFixed(1) + "]");
+            var xs = [c[0][0],c[1][0],c[2][0],c[3][0]], ys = [c[0][1],c[1][1],c[2][1],c[3][1]];
+            var minX = Math.min.apply(null,xs), minY = Math.min.apply(null,ys);
+            var maxX = Math.max.apply(null,xs), maxY = Math.max.apply(null,ys);
+            w("  BBOX comp: x=" + minX.toFixed(1) + " y=" + minY.toFixed(1) + " w=" + (maxX-minX).toFixed(1) + " h=" + (maxY-minY).toFixed(1));
         } catch(e){ w("  sourcePointToComp ERR "+es(e)); }
     }
 

@@ -320,15 +320,26 @@ function exportComp() {
         // is the authoritative placement — it captures offsets that live in unreadable
         // (NO_VALUE) rect-path Position props, where the layer transform alone is ambiguous
         // (multiple shapes can share one transform yet render in different places).
+        // Map ALL FOUR content corners into comp space and take the bounding box, so
+        // rotation/skew are handled. sourcePointToComp evaluates at the CURRENT comp time;
+        // pin the playhead to 0 first so this matches the t=0 sourceRect and static import.
         var compBounds = null;
         try {
             if (sr) {
-                var tl = L.sourcePointToComp([sr[0], sr[1]]);
-                var br = L.sourcePointToComp([sr[0] + sr[2], sr[1] + sr[3]]);
-                compBounds = [
-                    round(Math.min(tl[0], br[0])), round(Math.min(tl[1], br[1])),
-                    round(Math.abs(br[0] - tl[0])), round(Math.abs(br[1] - tl[1]))
+                var savedTime = comp.time;
+                comp.time = 0;
+                var cs = [
+                    L.sourcePointToComp([sr[0], sr[1]]),
+                    L.sourcePointToComp([sr[0] + sr[2], sr[1]]),
+                    L.sourcePointToComp([sr[0] + sr[2], sr[1] + sr[3]]),
+                    L.sourcePointToComp([sr[0], sr[1] + sr[3]])
                 ];
+                comp.time = savedTime;
+                var xs = [cs[0][0], cs[1][0], cs[2][0], cs[3][0]];
+                var ys = [cs[0][1], cs[1][1], cs[2][1], cs[3][1]];
+                var minX = Math.min.apply(null, xs), minY = Math.min.apply(null, ys);
+                var maxX = Math.max.apply(null, xs), maxY = Math.max.apply(null, ys);
+                compBounds = [round(minX), round(minY), round(maxX - minX), round(maxY - minY)];
             }
         } catch (e) {}
 
