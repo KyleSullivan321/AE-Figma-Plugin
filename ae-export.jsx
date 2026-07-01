@@ -292,21 +292,29 @@ function exportComp() {
         return null;
     }
 
-    // Comp-space bounding box of a path, from mapping its control points through the layer
-    // transform (pinned at t=0). Avoids the Trim-truncated sourceRect. Returns [x,y,w,h].
+    // Comp-space bounding box of the RENDERED path curve (not the control points, which
+    // over-inflate the box). We sample each cubic bezier segment densely and map points to
+    // comp space (pinned at t=0) — this matches how Figma computes a vector's bbox, so the
+    // imported node's x/y aligns. Avoids the Trim-truncated sourceRect. Returns [x,y,w,h].
     function pathBoundsComp(layer, path) {
         if (!path || !path.verts.length) return null;
         try {
             var savedTime = comp.time; comp.time = 0;
+            var V = path.verts, IN = path.inTan, OUT = path.outTan, n = V.length;
             var xs = [], ys = [];
-            for (var i = 0; i < path.verts.length; i++) {
-                var v = path.verts[i];
-                var pts = [v, [v[0] + path.inTan[i][0], v[1] + path.inTan[i][1]], [v[0] + path.outTan[i][0], v[1] + path.outTan[i][1]]];
-                for (var p = 0; p < pts.length; p++) {
-                    var c = layer.sourcePointToComp(pts[p]);
+            function sampleSeg(a, b) {
+                var p0 = V[a], p1 = [V[a][0] + OUT[a][0], V[a][1] + OUT[a][1]];
+                var p2 = [V[b][0] + IN[b][0], V[b][1] + IN[b][1]], p3 = V[b];
+                for (var s = 0; s <= 24; s++) {
+                    var t = s / 24, u = 1 - t;
+                    var bx = u*u*u*p0[0] + 3*u*u*t*p1[0] + 3*u*t*t*p2[0] + t*t*t*p3[0];
+                    var by = u*u*u*p0[1] + 3*u*u*t*p1[1] + 3*u*t*t*p2[1] + t*t*t*p3[1];
+                    var c = layer.sourcePointToComp([bx, by]);
                     xs.push(c[0]); ys.push(c[1]);
                 }
             }
+            for (var i = 0; i < n - 1; i++) sampleSeg(i, i + 1);
+            if (path.closed && n > 1) sampleSeg(n - 1, 0);
             comp.time = savedTime;
             var minX = Math.min.apply(null, xs), minY = Math.min.apply(null, ys);
             var maxX = Math.max.apply(null, xs), maxY = Math.max.apply(null, ys);

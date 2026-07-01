@@ -365,8 +365,11 @@ function applyTrim(node, L, comp) {
         var key = a.keys[k];
         var f = { timelinePosition: key.t, value: { type: 'FLOAT', value: clamp01(key.value[0] / 100) } };
         if (k > 0) {
-          var v0 = a.keys[k - 1].value[0] / 100, v1 = key.value[0] / 100;
-          var e = mapEasing(axisEase(a.keys[k - 1].easeOut, 0), axisEase(key.easeIn, 0), key.interp, key.t - a.keys[k - 1].t, v1 - v0);
+          // Easing dv must be in the SAME units as AE's speed (0-100 %/s), so use the RAW
+          // keyframe values here — dividing by 100 (as the trim VALUE does) would make dv
+          // 100x too small vs speed, producing out-of-range bezier handles.
+          var dv = key.value[0] - a.keys[k - 1].value[0];
+          var e = mapEasing(axisEase(a.keys[k - 1].easeOut, 0), axisEase(key.easeIn, 0), key.interp, key.t - a.keys[k - 1].t, dv);
           if (e) f.easing = e;
         }
         frames.push(f);

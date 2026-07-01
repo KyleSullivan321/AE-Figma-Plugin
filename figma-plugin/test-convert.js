@@ -157,5 +157,14 @@ var closed = buildSvgPath({closed:true, verts:[[0,0],[100,0],[100,100]], inTan:[
 assert(closed.d.indexOf('Z')>0, 'closed path ends with Z');
 // Trim %->0-1 mapping.
 assert(near(2/100,0.02) && near(100/100,1.0), 'trim percent to 0-1');
+// Trim easing UNITS: dv must be raw AE units (0-100) to match speed (0-100 %/s), else the
+// bezier handles blow out of range. Real data: End 2->100 over 0.367s, linear (speed=267).
+// avg=|98|/0.367=267, seg=267 -> y1=x1*1=0.167, y2=1-(1-x2)*1=0.833  (a linear diagonal).
+var trimEase = mapEasing({influence:16.667,speed:267.273},{influence:16.667,speed:267.273},'LINEAR',0.367,100-2);
+var te = trimEase.easingFunctionCubicBezier;
+assert(near(te.y1,0.167,) && te.y1>=0 && te.y1<=1, 'trim easing y1 in range (linear ~0.167)');
+assert(near(te.y2,0.833) && te.y2>=0 && te.y2<=1, 'trim easing y2 in range (linear ~0.833)');
+// The OLD bug (dv/100) would give y1 = 0.167*267/2.67 ≈ 16.7 — assert we're nowhere near.
+assert(te.y1 < 1.5, 'trim easing not blown out (the 100x unit bug)');
 
 console.log('ok — all conversion checks passed');
