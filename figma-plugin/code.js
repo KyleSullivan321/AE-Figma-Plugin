@@ -22,6 +22,11 @@ figma.ui.onmessage = async function (msg) {
 
 function log(text) { figma.ui.postMessage({ type: 'log', text: text }); }
 
+// Fraction of a text line's height that sits above the baseline (top -> baseline).
+// Used to place text by baseline so split words align. Tunable if a whole line reads
+// slightly high/low; alignment of words WITH EACH OTHER holds at any value.
+var BASELINE_ASCENT_RATIO = 0.8;
+
 // --- Motion API mapping (verify against live beta API) ----------------------
 // AE transform prop -> Figma keyframe field name(s). AE position/scale/anchor are
 // 2D (x,y); Figma keyframes are per-axis, so those map to two fields.
@@ -344,6 +349,14 @@ function positionNode(node, L, comp, origin, skipOpacity) {
     }
     node.x = cb[0] - origin[0];
     node.y = cb[1] - origin[1];
+    // Text: align by BASELINE, not the tight glyph-box top (which varies per word by
+    // ascender height, so split words drift vertically). AE's baselineComp is the first
+    // baseline in comp space; place the node so its baseline lands there. The node top is
+    // ~ascent above the baseline; ascent ≈ line height * a font-agnostic ratio.
+    if (node.type === 'TEXT' && L.baselineComp) {
+      var lh = (node.height > 0) ? node.height : ((L.text && L.text.fontSize) || 16);
+      node.y = L.baselineComp[1] - origin[1] - lh * BASELINE_ASCENT_RATIO;
+    }
     // compBounds already reflects the rotated box; re-rotating would double-count.
     if (tr.opacity != null && !animOp && !skipOpacity) node.opacity = clamp01(tr.opacity[0] / 100);
     return;

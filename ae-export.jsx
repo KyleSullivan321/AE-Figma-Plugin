@@ -583,7 +583,7 @@ function exportComp() {
 
             // Comp-space bounds + anchor, pinned at t=0, in THIS comp's space (precomp
             // sub-layers map into the precomp's space — the Figma precomp frame represents it).
-            var compBounds = null, anchorComp = null;
+            var compBounds = null, anchorComp = null, baselineComp = null;
             try {
                 if (sr) {
                     var savedTime = theComp.time;
@@ -597,6 +597,9 @@ function exportComp() {
                     var av = [0, 0];
                     try { var a = L.property("ADBE Transform Group").property("ADBE Anchor Point").value; av = [a[0], a[1]]; } catch (e) {}
                     var ac = L.sourcePointToComp(av);
+                    // Text baseline origin: the layer's [0,0] point is the first-line baseline.
+                    // Used to align split-word text by baseline (consistent) not tight-bbox top.
+                    if (type === "text") { var bl = L.sourcePointToComp([0, 0]); baselineComp = [round(bl[0]), round(bl[1])]; }
                     theComp.time = savedTime;
                     var xs = [cs[0][0], cs[1][0], cs[2][0], cs[3][0]];
                     var ys = [cs[0][1], cs[1][1], cs[2][1], cs[3][1]];
@@ -617,6 +620,7 @@ function exportComp() {
                 sourceRect: sr,
                 compBounds: compBounds,
                 anchorComp: anchorComp,
+                baselineComp: baselineComp, // text: first-baseline origin in comp space
                 transform: transform(L),
                 effects: effectsInfo(L)
             };
