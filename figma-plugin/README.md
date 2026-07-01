@@ -61,6 +61,10 @@ They talk through one JSON file. No network, no install bridge.
 - Freeform bezier paths import as real Figma vectors. **Path morph** (vertices animating
   over time) is not reproduced — Figma has no vector-geometry keyframe track. **Trim Paths**
   (write-on) is supported. Scaled/rotated vector layers are approximate.
+- Sharp-cornered strokes (e.g. star/polygon tips) may render a hair softer/sharper than AE —
+  a stroke-rasterization nuance, not a geometry difference. Stroke join/cap are transferred.
+- Split-word text aligns by baseline; the exact vertical offset uses an ascent estimate
+  (`BASELINE_ASCENT_RATIO` in code.js) — tweak it if a whole line sits slightly high/low.
 - Effects, masks, blend modes, expressions, 3D, cameras/lights: not exported.
 - Easing is mapped coarsely (linear / hold / ease). Bezier control values are
   approximated.
