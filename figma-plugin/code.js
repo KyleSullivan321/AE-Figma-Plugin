@@ -178,11 +178,12 @@ function positionNode(node, L, comp) {
   // the anchor/sourceRect math and the unreadable rect-path offset. Not used when animated
   // (compBounds is only a t=0 snapshot) or parented (would need parent-relative conversion).
   if (L.compBounds && !(posKeys && posKeys.length) && L.parentIndex == null) {
-    var cb = L.compBounds; // [x, y, w, h]
+    var cb = L.compBounds; // [x, y, w, h] — axis-aligned rendered bbox, rotation baked in
     if ('resize' in node) node.resize(Math.max(1, cb[2]), Math.max(1, cb[3]));
     node.x = cb[0];
     node.y = cb[1];
-    if (tr.rotation != null) node.rotation = -tr.rotation[0];
+    // Do NOT apply rotation here: compBounds already reflects the rendered (rotated) box.
+    // Re-rotating would double-count and tilt an otherwise-straight shape.
     if (tr.opacity != null) node.opacity = clamp01(tr.opacity[0] / 100);
     return;
   }
