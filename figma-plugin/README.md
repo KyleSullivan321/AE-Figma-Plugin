@@ -41,6 +41,8 @@ They talk through one JSON file. No network, no install bridge.
   (e.g. a null-object rig) propagates its motion to children
 - **Shapes:** rectangle, ellipse, star, polygon, and freeform bezier paths (real vectors)
 - **Trim Paths:** the write-on / draw-on animation → Figma `PATH_TRIM_START/END`
+- **Precomps:** nested compositions rebuilt as nested frames (transform + opacity inherit)
+- **Drop Shadow** effect → Figma drop shadow; **multiple shapes** per layer preserved
 - **Keyframes:** position / scale / rotation / opacity → Figma Motion tracks
 - **Easing:** AE keyframe ease → cubic-bezier (influence → control points); hold supported
 - **Images** are embedded base64 in the JSON and rebuilt as Figma image fills

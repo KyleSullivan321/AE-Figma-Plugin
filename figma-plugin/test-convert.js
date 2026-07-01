@@ -167,4 +167,19 @@ assert(near(te.y2,0.833) && te.y2>=0 && te.y2<=1, 'trim easing y2 in range (line
 // The OLD bug (dv/100) would give y1 = 0.167*267/2.67 ≈ 16.7 — assert we're nowhere near.
 assert(te.y1 < 1.5, 'trim easing not blown out (the 100x unit bug)');
 
+// --- drop shadow: AE direction+distance -> Figma offset -----------------------
+function dropOffset(direction, distance){
+  var rad = direction*Math.PI/180;
+  return { x: distance*Math.sin(rad), y: -distance*Math.cos(rad) };
+}
+// Real data: direction 135, distance 24 -> down-right (positive x, positive y).
+var off = dropOffset(135, 24);
+assert(near(off.x, 16.97, ) && off.x>0, 'drop shadow offset x down-right');
+assert(near(off.y, 16.97) && off.y>0, 'drop shadow offset y down-right');
+// direction 0 (up) -> shadow straight up (negative y).
+var up = dropOffset(0, 10);
+assert(near(up.x,0) && near(up.y,-10), 'direction 0 -> straight up');
+// opacity 127.5/255 -> 0.5
+assert(near(127.5/255, 0.5), 'shadow opacity 127.5 -> 0.5 alpha');
+
 console.log('ok — all conversion checks passed');

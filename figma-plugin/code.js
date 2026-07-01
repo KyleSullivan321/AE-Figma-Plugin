@@ -105,6 +105,7 @@ async function importComp(data) {
         catch (err) { motionOk = false; log('Motion skipped for "' + L.name + '": ' + (err && err.message || err)); }
 
         if (isPre) {
+          applyEffects(frame, L); // precomp effect applies to the whole nested group
           // Recurse the sub-comp's layers into the frame. Their compBounds are in sub-comp
           // space, which equals the frame's local space, so origin is [0,0].
           await buildLayerSet(L.subLayers || [], frame, [0, 0]);
@@ -117,6 +118,7 @@ async function importComp(data) {
             if (trOp != null && !animOp) content.opacity = clamp01(trOp[0] / 100);
             try { applyKeyframes(content, L, comp, ['opacity']); } catch (e) {}
             applyTrim(content, L, comp);
+            applyEffects(content, L);
           }
           var kids = kidsOf[L.index].slice().sort(function (a, b) { return b.index - a.index; });
           for (var i = 0; i < kids.length; i++) await build(kids[i], frame, [fx, fy]);
@@ -128,6 +130,7 @@ async function importComp(data) {
         try { applyKeyframes(content, L, comp); }
         catch (err) { motionOk = false; log('Motion skipped for "' + L.name + '": ' + (err && err.message || err)); }
         applyTrim(content, L, comp);
+        applyEffects(content, L);
       }
     }
 
@@ -161,7 +164,10 @@ async function createText(L) {
   // Always have a loadable font; prefer AE's family+style, fall back to Inter.
   var font = await loadFontSafe(t.fontFamily || t.font, t.fontStyle);
   node.fontName = font;
-  node.characters = (t.value != null) ? String(t.value) : L.name; // \n -> multi-line
+  // AE stores line breaks as char 3 (ETX) or char 13 (CR), not newline - normalize.
+  var chars = (t.value != null) ? String(t.value) : L.name;
+  chars = chars.split(String.fromCharCode(3)).join('\n').split(String.fromCharCode(13)).join('\n');
+  node.characters = chars;
 
   // Paragraph text (fixed box) vs point text (auto-size).
   if (t.boxSize && t.boxSize[0] > 0) {
@@ -202,15 +208,36 @@ function createSolid(L) {
 
 function createShape(L) {
   var s = L.shape || {};
+  // Multiple shapes in one layer -> a frame holding each sub-shape at its own position.
+  if (s.subShapes && s.subShapes.length > 1 && L.compBounds) {
+    var lb = L.compBounds; // [x,y,w,h] layer bounds in comp space
+    var frame = figma.createFrame();
+    frame.name = L.name;
+    frame.clipsContent = false;
+    frame.fills = [];
+    frame.resize(Math.max(1, lb[2]), Math.max(1, lb[3]));
+    for (var i = 0; i < s.subShapes.length; i++) {
+      var sub = s.subShapes[i];
+      var cb = sub.compBounds || [lb[0], lb[1], 50, 50];
+      var n = makeShapeNode(sub, [cb[2], cb[3]], L.name);
+      frame.appendChild(n);
+      if (n.type !== 'VECTOR') n.resize(Math.max(1, cb[2]), Math.max(1, cb[3]));
+      n.x = cb[0] - lb[0];
+      n.y = cb[1] - lb[1];
+    }
+    return frame;
+  }
   var size = s.size || [100, 100];
+  return makeShapeNode(s, [Math.max(1, size[0]), Math.max(1, size[1])], L.name);
+}
+
+// Build one shape node (rect/ellipse/star/polygon/vector) from a shape descriptor.
+function makeShapeNode(s, size, name) {
   var w = Math.max(1, size[0]), h = Math.max(1, size[1]);
   var kind = s.shapeKind || 'rect';
-
-  // Create the matching Figma primitive instead of always a rectangle.
-  var node, isVector = false;
+  var node;
   if (kind === 'ellipse') {
-    node = figma.createEllipse();
-    node.resize(w, h);
+    node = figma.createEllipse(); node.resize(w, h);
   } else if (kind === 'star') {
     node = figma.createStar();
     if (s.points) node.pointCount = Math.max(3, s.points);
@@ -221,20 +248,14 @@ function createShape(L) {
     if (s.points) node.pointCount = Math.max(3, s.points);
     node.resize(w, h);
   } else if (kind === 'path' && s.path && s.path.verts && s.path.verts.length >= 2) {
-    // Freeform bezier -> real Figma vector built from the AE path data.
     node = figma.createVector();
-    var svg = buildSvgPath(s.path);
-    node.vectorPaths = [{ windingRule: 'NONZERO', data: svg.d }];
-    // node auto-sizes to the geometry; no resize (keeps natural path proportions).
+    node.vectorPaths = [{ windingRule: 'NONZERO', data: buildSvgPath(s.path).d }];
   } else {
-    node = figma.createRectangle();
-    node.resize(w, h);
+    node = figma.createRectangle(); node.resize(w, h);
   }
-
-  // Fill only if AE had an enabled fill — otherwise genuinely no fill (don't invent gray).
-  node.fills = s.fill ? [paintFor(s.fill, L.name, 'fill')] : [];
+  node.fills = s.fill ? [paintFor(s.fill, name, 'fill')] : [];
   if (s.stroke) {
-    if (s.stroke.gradient) node.strokes = [paintFor(s.stroke, L.name, 'stroke')];
+    if (s.stroke.gradient) node.strokes = [paintFor(s.stroke, name, 'stroke')];
     else if (s.stroke.color) node.strokes = [solidPaint(s.stroke.color)];
     if (s.stroke.width) node.strokeWeight = s.stroke.width;
   }
@@ -372,6 +393,32 @@ function applyKeyframes(node, L, comp, only) {
     var tl = node.timelines[0];
     if (tl && tl.duration < comp.duration) node.setTimelineDuration(tl.id, comp.duration);
   }
+}
+
+// AE effects -> Figma effects. v1: Drop Shadow. AE direction (deg, cw from up) + distance
+// -> offset; softness -> blur radius; opacity (0-255) -> shadow alpha.
+function applyEffects(node, L) {
+  var fx = L.effects;
+  if (!fx || !fx.length || !('effects' in node)) return;
+  var effects = [];
+  for (var i = 0; i < fx.length; i++) {
+    var e = fx[i];
+    if (e.type === 'dropShadow') {
+      var rad = (e.direction || 0) * Math.PI / 180;
+      var dist = e.distance || 0;
+      var c = e.color || [0, 0, 0];
+      effects.push({
+        type: 'DROP_SHADOW',
+        color: { r: clamp01(c[0]), g: clamp01(c[1]), b: clamp01(c[2]), a: clamp01((e.opacity != null ? e.opacity : 255) / 255) },
+        offset: { x: dist * Math.sin(rad), y: -dist * Math.cos(rad) },
+        radius: e.softness || 0,
+        spread: 0,
+        visible: true,
+        blendMode: 'NORMAL'
+      });
+    }
+  }
+  if (effects.length) node.effects = effects;
 }
 
 // AE Trim Paths -> Figma PATH_TRIM_START/END (0-1). AE trim is 0-100 %. Applies the

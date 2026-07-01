@@ -188,6 +188,30 @@ function exportComp() {
         };
     }
 
+    // Read supported effects. v1: Drop Shadow (maps cleanly to Figma's DROP_SHADOW).
+    function effectsInfo(layer) {
+        var out = [];
+        var fx;
+        try { fx = layer.property("ADBE Effect Parade"); } catch (e) { return out; }
+        if (!fx) return out;
+        for (var i = 1; i <= fx.numProperties; i++) {
+            var ef = fx.property(i);
+            try {
+                if (ef.matchName === "ADBE Drop Shadow" && ef.enabled) {
+                    out.push({
+                        type: "dropShadow",
+                        color: color(ef.property("ADBE Drop Shadow-0001").value),
+                        opacity: round(ef.property("ADBE Drop Shadow-0002").value), // 0-255
+                        direction: round(ef.property("ADBE Drop Shadow-0003").value), // degrees
+                        distance: round(ef.property("ADBE Drop Shadow-0004").value),
+                        softness: round(ef.property("ADBE Drop Shadow-0005").value)
+                    });
+                }
+            } catch (e) {}
+        }
+        return out;
+    }
+
     function shapeInfo(layer) {
         // Shapes are deeply nested; for v1 capture bounding size + first fill color +
         // a rectangle's corner roundness if present.
@@ -216,9 +240,100 @@ function exportComp() {
                 info.pathBoundsComp = pathBoundsComp(layer, info.path);
             }
             info.trim = extractTrim(contents); // {start,end,offset} incl. keyframes, or null
+            // Multiple shape groups in one layer -> export each as its own sub-shape so the
+            // Figma side can render them separately (not one giant merged rect).
+            var subs = extractSubShapes(layer, contents);
+            if (subs && subs.length > 1) info.subShapes = subs;
             return info;
         } catch (e) {}
         return { size: size, fill: fill, stroke: null, cornerRadius: cornerRadius, shapeKind: "rect" };
+    }
+
+    // Each top-level "ADBE Vector Group" is one visible shape. Extract kind + geometry +
+    // paints + its comp-space bounds (from the group's transform position). Returns an array.
+    function extractSubShapes(layer, contents) {
+        var out = [];
+        if (!contents) return out;
+        for (var i = 1; i <= contents.numProperties; i++) {
+            var g = contents.property(i);
+            if (g.matchName !== "ADBE Vector Group") continue;
+            var inner = null;
+            try { inner = g.property("ADBE Vectors Group"); } catch (e) {}
+            if (!inner) continue;
+
+            var kind = firstShapeKind(inner) || { type: "rect" };
+            var paints = firstPaints(inner);
+            var cr = firstRectRoundness(inner);
+
+            // Group transform position (layer space) + primitive size.
+            var gpos = [0, 0], gscale = [100, 100];
+            try {
+                var tg = g.property("ADBE Vector Transform Group");
+                var p = tg.property("ADBE Vector Position").value; gpos = [p[0], p[1]];
+                var sc = tg.property("ADBE Vector Scale").value; gscale = [sc[0], sc[1]];
+            } catch (e) {}
+
+            var sub = { shapeKind: kind.type, fill: paints.fill, stroke: paints.stroke,
+                        cornerRadius: cr, points: kind.points || null, innerRatio: kind.innerRatio || null };
+
+            // Layer-space bbox for this sub-shape, then map to comp for placement.
+            var lbox = subShapeLayerBox(inner, gpos, gscale, kind);
+            if (kind.type === "path") { sub.path = extractPath(inner); }
+            sub.compBounds = mapLayerBoxToComp(layer, lbox);
+            out.push(sub);
+        }
+        return out;
+    }
+
+    // Layer-space [minX,minY,maxX,maxY] of a sub-shape given its group position/scale.
+    function subShapeLayerBox(inner, gpos, gscale, kind) {
+        var sx = gscale[0] / 100, sy = gscale[1] / 100;
+        function findPrim(group, mn) {
+            for (var i = 1; i <= group.numProperties; i++) {
+                var pr = group.property(i);
+                if (pr.matchName === mn) return pr;
+                try { if (pr.property("ADBE Vectors Group")) { var r = findPrim(pr.property("ADBE Vectors Group"), mn); if (r) return r; } } catch (e) {}
+            }
+            return null;
+        }
+        var cx = gpos[0], cy = gpos[1], hw = 50, hh = 50;
+        try {
+            if (kind.type === "rect" || kind.type === "ellipse") {
+                var pm = findPrim(inner, kind.type === "rect" ? "ADBE Vector Shape - Rect" : "ADBE Vector Shape - Ellipse");
+                var szName = kind.type === "rect" ? "ADBE Vector Rect Size" : "ADBE Vector Ellipse Size";
+                var posName = kind.type === "rect" ? "ADBE Vector Rect Position" : "ADBE Vector Ellipse Position";
+                var sz = pm.property(szName).value; hw = sz[0] / 2 * sx; hh = sz[1] / 2 * sy;
+                try { var rp = pm.property(posName).value; cx += rp[0] * sx; cy += rp[1] * sy; } catch (e) {}
+            } else if (kind.type === "star" || kind.type === "polygon") {
+                var st = findPrim(inner, "ADBE Vector Shape - Star");
+                var or = st.property("ADBE Vector Star Outer Radius").value; hw = or * sx; hh = or * sy;
+            } else if (kind.type === "path") {
+                var pth = extractPath(inner);
+                if (pth && pth.verts.length) {
+                    var xs = [], ys = [];
+                    for (var v = 0; v < pth.verts.length; v++) { xs.push(gpos[0] + pth.verts[v][0] * sx); ys.push(gpos[1] + pth.verts[v][1] * sy); }
+                    return [Math.min.apply(null, xs), Math.min.apply(null, ys), Math.max.apply(null, xs), Math.max.apply(null, ys)];
+                }
+            }
+        } catch (e) {}
+        return [cx - hw, cy - hh, cx + hw, cy + hh];
+    }
+
+    function mapLayerBoxToComp(layer, lbox) {
+        try {
+            var savedTime = comp.time; comp.time = 0;
+            var c = [
+                layer.sourcePointToComp([lbox[0], lbox[1]]),
+                layer.sourcePointToComp([lbox[2], lbox[1]]),
+                layer.sourcePointToComp([lbox[2], lbox[3]]),
+                layer.sourcePointToComp([lbox[0], lbox[3]])
+            ];
+            comp.time = savedTime;
+            var xs = [c[0][0], c[1][0], c[2][0], c[3][0]], ys = [c[0][1], c[1][1], c[2][1], c[3][1]];
+            var minX = Math.min.apply(null, xs), minY = Math.min.apply(null, ys);
+            var maxX = Math.max.apply(null, xs), maxY = Math.max.apply(null, ys);
+            return [round(minX), round(minY), round(maxX - minX), round(maxY - minY)];
+        } catch (e) { return null; }
     }
 
     // Detect the first shape PRIMITIVE so Figma can create the matching node type instead
@@ -495,7 +610,8 @@ function exportComp() {
                 sourceRect: sr,
                 compBounds: compBounds,
                 anchorComp: anchorComp,
-                transform: transform(L)
+                transform: transform(L),
+                effects: effectsInfo(L)
             };
 
             if (type === "text") entry.text = textInfo(L);
@@ -637,7 +753,7 @@ function exportComp() {
         "• Text animators (per-char/word/line)",
         "• Gradient colors (imports as gray placeholder)",
         "• Path morph animation (trim/write-on IS supported)",
-        "• Effects, masks, blend modes, expressions",
+        "• Effects except Drop Shadow; masks, blend modes",
         "• 3D layers, cameras, lights",
         "• Adjustment layers (skipped)"
     ];
