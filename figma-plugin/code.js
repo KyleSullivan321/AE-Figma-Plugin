@@ -193,9 +193,19 @@ function positionNode(node, L, comp) {
   var pos = (posKeys && posKeys.length) ? posKeys[0].value : (tr.position || [0, 0]);
   var anchor = tr.anchor || [0, 0];
   var sr = L.sourceRect || [0, 0, node.width, node.height]; // [left, top, w, h]
+  var kf = tr.keyframes || {};
+
+  // For an ANIMATED property, its motion track (built in applyKeyframes) animates
+  // relative to the node's NEUTRAL resting transform (Figma tracks are additive for
+  // translation/rotation, multiplicative for scale). So the static value must NOT also
+  // be applied — doing so double-counts (e.g. static rotation + rotation track = tilt).
+  // Only apply the static value when the property is NOT keyframed.
+  var animScale = kf.scale && kf.scale.length;
+  var animRot   = kf.rotation && kf.rotation.length;
+  var animOp    = kf.opacity && kf.opacity.length;
 
   var sx = 1, sy = 1;
-  if (tr.scale) {
+  if (tr.scale && !animScale) {
     sx = tr.scale[0] / 100;
     sy = (tr.scale[1] != null ? tr.scale[1] : tr.scale[0]) / 100;
   }
@@ -207,8 +217,8 @@ function positionNode(node, L, comp) {
   node.x = pos[0] + (sr[0] - anchor[0]) * sx;
   node.y = pos[1] + (sr[1] - anchor[1]) * sy;
 
-  if (tr.rotation != null) node.rotation = -tr.rotation[0]; // AE clockwise+, Figma ccw+
-  if (tr.opacity != null) node.opacity = clamp01(tr.opacity[0] / 100);
+  if (tr.rotation != null && !animRot) node.rotation = -tr.rotation[0]; // AE cw+, Figma ccw+
+  if (tr.opacity != null && !animOp) node.opacity = clamp01(tr.opacity[0] / 100);
 }
 
 // --- keyframes (Motion API, beta) ------------------------------------------
