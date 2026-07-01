@@ -123,12 +123,17 @@ function exportComp() {
         var rot = p("ADBE Rotate Z");
         var op = p("ADBE Opacity");
         var anchor = p("ADBE Anchor Point");
-        // Separated position throws on .value; reconstruct [x,y] from the sub-props.
+        // Separated-dimension position: the combined "ADBE Position" reports a wrong
+        // (often comp-center) value instead of throwing, so we must check the flag and
+        // read the per-axis sub-props explicitly. Same trap that hid the real easing.
+        var posSeparated = false;
+        try { posSeparated = pos && pos.dimensionsSeparated; } catch (e) {}
         var posStatic;
-        try { posStatic = staticVal(pos); }
-        catch (e) {
+        if (posSeparated) {
             var sx = p("ADBE Position_0"), sy = p("ADBE Position_1");
             posStatic = [sx ? round(sx.value) : 0, sy ? round(sy.value) : 0, 0];
+        } else {
+            try { posStatic = staticVal(pos); } catch (e) { posStatic = [0, 0, 0]; }
         }
         return {
             position: posStatic,
@@ -170,9 +175,10 @@ function exportComp() {
     }
 
     function shapeInfo(layer) {
-        // Shapes are deeply nested; for v1 capture bounding size + first fill color.
+        // Shapes are deeply nested; for v1 capture bounding size + first fill color +
+        // a rectangle's corner roundness if present.
         // ponytail: full path/vector export deferred. Add when round-tripped vectors are needed.
-        var size = null, fill = null;
+        var size = null, fill = null, cornerRadius = null;
         try {
             var r = layer.sourceRectAtTime(0, false);
             size = [round(r.width), round(r.height)];
@@ -180,8 +186,9 @@ function exportComp() {
         try {
             var contents = layer.property("ADBE Root Vectors Group");
             fill = firstFillColor(contents);
+            cornerRadius = firstRectRoundness(contents);
         } catch (e) {}
-        return { size: size, fill: fill };
+        return { size: size, fill: fill, cornerRadius: cornerRadius };
     }
 
     function firstFillColor(group) {
@@ -198,6 +205,26 @@ function exportComp() {
                 if (pr.property("ADBE Vectors Group")) {
                     var c = firstFillColor(pr.property("ADBE Vectors Group"));
                     if (c) return c;
+                }
+            } catch (e) {}
+        }
+        return null;
+    }
+
+    // Find the first rectangle's corner roundness (AE "Rectangle Path > Roundness").
+    function firstRectRoundness(group) {
+        if (!group) return null;
+        for (var i = 1; i <= group.numProperties; i++) {
+            var pr = group.property(i);
+            try {
+                if (pr.matchName === "ADBE Vector Shape - Rect") {
+                    return round(pr.property("ADBE Vector Rect Roundness").value);
+                }
+            } catch (e) {}
+            try {
+                if (pr.property("ADBE Vectors Group")) {
+                    var c = firstRectRoundness(pr.property("ADBE Vectors Group"));
+                    if (c !== null) return c;
                 }
             } catch (e) {}
         }
