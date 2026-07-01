@@ -96,6 +96,11 @@ function exportComp() {
         try { py = tg.property("ADBE Position_1"); } catch (e) {}
         var kx = keyframes(px), ky = keyframes(py);
         if (!kx && !ky) return null;
+        // When only ONE axis is keyframed, the other axis is CONSTANT — use its static
+        // value, not 0 (the bug that dropped a null's Y to 0 while X animated).
+        var staticX = 0, staticY = 0;
+        try { staticX = round(px.value); } catch (e) {}
+        try { staticY = round(py.value); } catch (e) {}
         var n = Math.max(kx ? kx.length : 0, ky ? ky.length : 0);
         var out = [];
         for (var i = 0; i < n; i++) {
@@ -105,7 +110,7 @@ function exportComp() {
             // by storing arrays; the Figma side reads easeIn/easeOut[axis].
             out.push({
                 t: base.t,
-                value: [a ? a.value[0] : 0, b ? b.value[0] : 0, 0],
+                value: [a ? a.value[0] : staticX, b ? b.value[0] : staticY, 0],
                 easeIn:  [a ? a.easeIn  : null, b ? b.easeIn  : null],
                 easeOut: [a ? a.easeOut : null, b ? b.easeOut : null],
                 interp: base.interp,
@@ -486,7 +491,8 @@ function exportComp() {
         "• Shape vector paths (exported as bounding box)",
         "• Effects, masks, blend modes, expressions",
         "• 3D layers, cameras, lights",
-        "• Rotated static shapes (come in axis-aligned)"
+        "• Rotated static shapes (come in axis-aligned)",
+        "• Animated parents (null rigs): children don't follow"
     ];
     for (var i = 0; i < limits.length; i++) note.add("statictext", undefined, limits[i]);
 

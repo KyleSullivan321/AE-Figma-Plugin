@@ -65,14 +65,15 @@ async function importComp(data) {
     log('Created ' + L.type + ': ' + L.name);
   }
 
-  // Parenting: reparent into the parent's node if it can hold children, else root.
+  // Placement: AE parenting is FLATTENED. Figma shapes/text/solids can't contain children,
+  // so we don't rebuild the hierarchy; instead every layer is placed at its ABSOLUTE
+  // comp-space position (via compBounds), which already bakes in each parent's transform at
+  // t=0. Static parented layouts and t=0 starts come out correct. Limitation: an animated
+  // PARENT's motion does not propagate to its children (e.g. a null-object rig) — the child
+  // gets its own animation from its correct starting spot, but won't follow the parent.
   for (var j = 0; j < entries.length; j++) {
-    var e = entries[j];
-    var pIdx = e.data.parentIndex;
-    var parent = (pIdx != null && byIndex[pIdx]) ? byIndex[pIdx] : root;
-    if ('appendChild' in parent) parent.appendChild(e.node);
-    else root.appendChild(e.node);
-    positionNode(e.node, e.data, comp);
+    root.appendChild(entries[j].node);
+    positionNode(entries[j].node, entries[j].data, comp);
   }
 
   // Keyframes last, after layout is settled.
@@ -173,18 +174,19 @@ function positionNode(node, L, comp) {
   var tr = L.transform || {};
   var posKeys = tr.keyframes && tr.keyframes.position;
 
-  // Fast path: comp-space bounds are the authoritative rendered top-left + size. Use them
-  // for a STATIC, TOP-LEVEL layer (comp space == frame space when unparented). Sidesteps
-  // the anchor/sourceRect math and the unreadable rect-path offset. Not used when animated
-  // (compBounds is only a t=0 snapshot) or parented (would need parent-relative conversion).
-  if (L.compBounds && !(posKeys && posKeys.length) && L.parentIndex == null) {
+  // Fast path: comp-space bounds are the authoritative rendered top-left + size, in
+  // ABSOLUTE comp coordinates. Since layers flatten to the root frame (which sits at comp
+  // origin), this is correct even for parented layers — it captures the parent's transform
+  // contribution at t=0. Used when position isn't keyframed (compBounds is a t=0 snapshot).
+  var animOpacity = tr.keyframes && tr.keyframes.opacity && tr.keyframes.opacity.length;
+  if (L.compBounds && !(posKeys && posKeys.length)) {
     var cb = L.compBounds; // [x, y, w, h] — axis-aligned rendered bbox, rotation baked in
     if ('resize' in node) node.resize(Math.max(1, cb[2]), Math.max(1, cb[3]));
     node.x = cb[0];
     node.y = cb[1];
     // Do NOT apply rotation here: compBounds already reflects the rendered (rotated) box.
     // Re-rotating would double-count and tilt an otherwise-straight shape.
-    if (tr.opacity != null) node.opacity = clamp01(tr.opacity[0] / 100);
+    if (tr.opacity != null && !animOpacity) node.opacity = clamp01(tr.opacity[0] / 100);
     return;
   }
 
