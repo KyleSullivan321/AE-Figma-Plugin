@@ -159,13 +159,22 @@ function exportComp() {
     function textInfo(layer) {
         try {
             var td = layer.property("ADBE Text Properties").property("ADBE Text Document").value;
-            return {
-                value: td.text,
+            var info = {
+                value: td.text,                       // may contain \n for multi-line
                 fontSize: round(td.fontSize),
-                font: td.font,
+                font: td.font,                        // PostScript name (for loading)
                 color: color(td.fillColor),
-                justification: td.justification
+                justification: td.justification       // ParagraphJustification enum
             };
+            // Extras for fidelity — all wrapped so an older AE that lacks one won't fail.
+            try { info.fontFamily = td.fontFamily; } catch (e) {}
+            try { info.fontStyle = td.fontStyle; } catch (e) {}     // e.g. "Bold", "Italic"
+            try { info.tracking = round(td.tracking); } catch (e) {} // letter spacing (1/1000 em)
+            try { if (!td.autoLeading) info.leading = round(td.leading); } catch (e) {} // line height px
+            try { if (!td.applyFill) info.color = null; } catch (e) {} // no fill -> null
+            try { if (td.applyStroke) info.stroke = { color: color(td.strokeColor), width: round(td.strokeWidth) }; } catch (e) {}
+            try { if (td.boxText) info.boxSize = [round(td.boxTextSize[0]), round(td.boxTextSize[1])]; } catch (e) {}
+            return info;
         } catch (e) { return null; }
     }
 
@@ -391,6 +400,8 @@ function exportComp() {
         if (layer instanceof TextLayer) return "text";
         if (layer instanceof ShapeLayer) return "shape";
         if (layer.source && layer.source.mainSource instanceof SolidSource) return "solid";
+        // A layer whose source is another composition -> precomp (recurse into it).
+        if (layer.source && (layer.source instanceof CompItem)) return "precomp";
         // Footage backed by a still-image file -> image layer.
         if (layer.source && layer.source.mainSource instanceof FileSource
             && layer.source.mainSource.file && isImageFile(layer.source.mainSource.file)) {
@@ -424,88 +435,89 @@ function exportComp() {
         };
     }
 
-    // --- walk layers ------------------------------------------------------
+    // --- walk layers (recursive: precomps recurse into their source comp) --
 
-    plog("comp '" + comp.name + "' has " + comp.numLayers + " layers");
-    var layers = [];
-    for (var i = 1; i <= comp.numLayers; i++) {
-        var L = comp.layer(i);
-        var type = layerType(L);
-        plog("layer " + i + " '" + L.name + "' type=" + type);
-        if (type === "other") continue; // skip cameras, lights, adjustment-only, nulls-without-children for v1
-        // Adjustment layers are transparent in AE (they only apply effects to layers
-        // below). Rendering one as an opaque solid covers everything behind it. Skip.
-        var isAdjustment = false;
-        try { isAdjustment = L.adjustmentLayer; } catch (e) {}
-        if (isAdjustment) { plog("  skip adjustment layer"); continue; }
+    // Walk one composition's layers into an array of entries. `theComp` is the comp being
+    // walked (main comp, or a precomp's source). Recurses for precomp layers, so nested
+    // comps come through as nested Figma frames. `depth` guards against pathological nesting.
+    function walkComp(theComp, depth) {
+        plog("walk comp '" + theComp.name + "' (" + theComp.numLayers + " layers, depth " + depth + ")");
+        var out = [];
+        if (depth > 8) return out; // safety: absurdly deep nesting
+        for (var i = 1; i <= theComp.numLayers; i++) {
+            var L = theComp.layer(i);
+            var type = layerType(L);
+            plog("  layer " + i + " '" + L.name + "' type=" + type);
+            if (type === "other") continue;
+            var isAdjustment = false;
+            try { isAdjustment = L.adjustmentLayer; } catch (e) {}
+            if (isAdjustment) { plog("    skip adjustment layer"); continue; }
 
-        // sourceRect = the layer's content bounds in its OWN coordinate space.
-        // Critical for placement: AE's anchor/position are relative to this origin,
-        // and content rarely starts at (0,0) - text especially has a non-zero top.
-        var sr = null;
-        try {
-            var r = L.sourceRectAtTime(0, false);
-            sr = [round(r.left), round(r.top), round(r.width), round(r.height)];
-        } catch (e) {}
+            var sr = null;
+            try {
+                var r = L.sourceRectAtTime(0, false);
+                sr = [round(r.left), round(r.top), round(r.width), round(r.height)];
+            } catch (e) {}
 
-        // Comp-space bounds: the layer's rendered top-left + size in COMPOSITION pixels,
-        // computed by mapping the layer-space content corners through the transform. This
-        // is the authoritative placement — it captures offsets that live in unreadable
-        // (NO_VALUE) rect-path Position props, where the layer transform alone is ambiguous
-        // (multiple shapes can share one transform yet render in different places).
-        // Map ALL FOUR content corners into comp space and take the bounding box, so
-        // rotation/skew are handled. sourcePointToComp evaluates at the CURRENT comp time;
-        // pin the playhead to 0 first so this matches the t=0 sourceRect and static import.
-        // anchorComp = the layer's ANCHOR POINT in comp space at t=0. Used by the Figma
-        // side to center a parent's wrapper frame on the anchor, so frame rotation/scale
-        // pivots around the anchor (matching AE) and children inherit the parent's motion.
-        var compBounds = null, anchorComp = null;
-        try {
-            if (sr) {
-                var savedTime = comp.time;
-                comp.time = 0;
-                var cs = [
-                    L.sourcePointToComp([sr[0], sr[1]]),
-                    L.sourcePointToComp([sr[0] + sr[2], sr[1]]),
-                    L.sourcePointToComp([sr[0] + sr[2], sr[1] + sr[3]]),
-                    L.sourcePointToComp([sr[0], sr[1] + sr[3]])
-                ];
-                var av = [0, 0];
-                try { var a = L.property("ADBE Transform Group").property("ADBE Anchor Point").value; av = [a[0], a[1]]; } catch (e) {}
-                var ac = L.sourcePointToComp(av);
-                comp.time = savedTime;
-                var xs = [cs[0][0], cs[1][0], cs[2][0], cs[3][0]];
-                var ys = [cs[0][1], cs[1][1], cs[2][1], cs[3][1]];
-                var minX = Math.min.apply(null, xs), minY = Math.min.apply(null, ys);
-                var maxX = Math.max.apply(null, xs), maxY = Math.max.apply(null, ys);
-                compBounds = [round(minX), round(minY), round(maxX - minX), round(maxY - minY)];
-                anchorComp = [round(ac[0]), round(ac[1])];
+            // Comp-space bounds + anchor, pinned at t=0, in THIS comp's space (precomp
+            // sub-layers map into the precomp's space — the Figma precomp frame represents it).
+            var compBounds = null, anchorComp = null;
+            try {
+                if (sr) {
+                    var savedTime = theComp.time;
+                    theComp.time = 0;
+                    var cs = [
+                        L.sourcePointToComp([sr[0], sr[1]]),
+                        L.sourcePointToComp([sr[0] + sr[2], sr[1]]),
+                        L.sourcePointToComp([sr[0] + sr[2], sr[1] + sr[3]]),
+                        L.sourcePointToComp([sr[0], sr[1] + sr[3]])
+                    ];
+                    var av = [0, 0];
+                    try { var a = L.property("ADBE Transform Group").property("ADBE Anchor Point").value; av = [a[0], a[1]]; } catch (e) {}
+                    var ac = L.sourcePointToComp(av);
+                    theComp.time = savedTime;
+                    var xs = [cs[0][0], cs[1][0], cs[2][0], cs[3][0]];
+                    var ys = [cs[0][1], cs[1][1], cs[2][1], cs[3][1]];
+                    var minX = Math.min.apply(null, xs), minY = Math.min.apply(null, ys);
+                    var maxX = Math.max.apply(null, xs), maxY = Math.max.apply(null, ys);
+                    compBounds = [round(minX), round(minY), round(maxX - minX), round(maxY - minY)];
+                    anchorComp = [round(ac[0]), round(ac[1])];
+                }
+            } catch (e) {}
+
+            var entry = {
+                index: L.index,
+                name: L.name,
+                type: type,
+                parentIndex: L.parent ? L.parent.index : null,
+                inPoint: round(L.inPoint),
+                outPoint: round(L.outPoint),
+                sourceRect: sr,
+                compBounds: compBounds,
+                anchorComp: anchorComp,
+                transform: transform(L)
+            };
+
+            if (type === "text") entry.text = textInfo(L);
+            else if (type === "solid") entry.solid = solidInfo(L);
+            else if (type === "shape") entry.shape = shapeInfo(L);
+            else if (type === "image") {
+                entry.image = imageInfo(L);
+                if (!entry.image) continue;
+            } else if (type === "precomp") {
+                // Recurse into the nested composition; its layers become the precomp's
+                // subLayers, rebuilt as a nested Figma frame sized to the precomp.
+                var sub = L.source;
+                entry.subComp = { width: sub.width, height: sub.height, duration: round(sub.duration) };
+                entry.subLayers = walkComp(sub, depth + 1);
             }
-        } catch (e) {}
 
-        var entry = {
-            index: L.index,
-            name: L.name,
-            type: type,
-            parentIndex: L.parent ? L.parent.index : null,
-            inPoint: round(L.inPoint),
-            outPoint: round(L.outPoint),
-            sourceRect: sr,          // [left, top, width, height] in layer space
-            compBounds: compBounds,  // [x, y, w, h] rendered top-left + size in comp space
-            anchorComp: anchorComp,  // [x, y] anchor point in comp space at t=0
-            transform: transform(L)
-        };
-
-        if (type === "text") entry.text = textInfo(L);
-        else if (type === "solid") entry.solid = solidInfo(L);
-        else if (type === "shape") entry.shape = shapeInfo(L);
-        else if (type === "image") {
-            entry.image = imageInfo(L);
-            if (!entry.image) continue; // unreadable source -> skip rather than emit a broken layer
+            out.push(entry);
         }
-
-        layers.push(entry);
+        return out;
     }
+
+    var layers = walkComp(comp, 0);
 
     var data = {
         schema: 1,

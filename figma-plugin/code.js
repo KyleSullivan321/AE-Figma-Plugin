@@ -47,91 +47,95 @@ async function importComp(data) {
   root.x = 0; root.y = 0;
   figma.currentPage.appendChild(root);
 
-  // Build the parent/child hierarchy so an animated parent (e.g. a null-object rig)
-  // propagates its motion to children. AE parenting inherits position/rotation/scale
-  // (NOT opacity). We rebuild each PARENT layer as a Figma FRAME centered on its anchor
-  // point (so rotation/scale pivot around the anchor, matching AE) that carries the
-  // parent's transform + tracks; the parent's own content and its children nest inside.
-  var layerByIndex = {};
-  var childrenOf = {}; // parentIndex -> [layer]
-  var rootLayers = [];
-  data.layers.forEach(function (L) {
-    layerByIndex[L.index] = L;
-    // For a freeform path, the real bounds come from the path geometry, not sourceRect
-    // (which a mid-animation Trim Paths modifier truncates). Use the path-derived bounds.
-    if (L.shape && L.shape.pathBoundsComp) L.compBounds = L.shape.pathBoundsComp;
-  });
-  data.layers.forEach(function (L) {
-    if (L.parentIndex != null && layerByIndex[L.parentIndex]) {
-      (childrenOf[L.parentIndex] = childrenOf[L.parentIndex] || []).push(L);
-    } else {
-      rootLayers.push(L);
-    }
-  });
-  function isParent(L) { return !!(childrenOf[L.index] && childrenOf[L.index].length); }
-
+  // Build the parent/child hierarchy so an animated parent (a null-object rig) propagates
+  // its motion to children, and recurse into precomps. AE parenting inherits
+  // position/rotation/scale (NOT opacity); a PRECOMP inherits all of them plus opacity.
+  // Each parent/precomp becomes a Figma FRAME centered on its anchor (so rotation/scale
+  // pivot around the anchor, matching AE) carrying the transform; content + children nest.
   var motionOk = true;
   var count = 0;
 
-  // Recursively build a layer into `container` (a Figma node), where `origin` is the
-  // container's comp-space top-left ([0,0] for the root frame).
-  async function build(L, container, origin) {
-    var content = await createNode(L);
-    count++;
+  // Build one LAYER SET (the main layers, or a precomp's sub-layers) into `container`.
+  // `origin` = comp-space top-left of the container's coordinate system (subtracted from
+  // each layer's compBounds). For the root and for precomp frames it is [0,0] because those
+  // layers' compBounds are already expressed in that frame's local space.
+  async function buildLayerSet(layers, container, origin) {
+    var byIndex = {}, kidsOf = {}, roots = [];
+    layers.forEach(function (L) {
+      byIndex[L.index] = L;
+      if (L.shape && L.shape.pathBoundsComp) L.compBounds = L.shape.pathBoundsComp;
+    });
+    layers.forEach(function (L) {
+      if (L.parentIndex != null && byIndex[L.parentIndex]) {
+        (kidsOf[L.parentIndex] = kidsOf[L.parentIndex] || []).push(L);
+      } else { roots.push(L); }
+    });
+    function isParent(L) { return !!(kidsOf[L.index] && kidsOf[L.index].length); }
 
-    if (isParent(L)) {
-      // Wrapper frame carries the layer's transform; content + children nest inside.
-      var cb = L.compBounds || [0, 0, 100, 100];
-      var w = Math.max(1, cb[2]), h = Math.max(1, cb[3]);
-      var anchor = L.anchorComp || [cb[0] + w / 2, cb[1] + h / 2];
-      var frame = figma.createFrame();
-      frame.name = L.name;
-      frame.clipsContent = false;
-      frame.fills = [];
-      frame.resize(w, h);
-      // Center the frame on the anchor (comp space) => Figma's center-pivot rotation/scale
-      // matches AE's anchor-pivot. Frame comp top-left:
-      var fx = anchor[0] - w / 2, fy = anchor[1] - h / 2;
-      container.appendChild(frame);
-      frame.x = fx - origin[0];
-      frame.y = fy - origin[1];
+    async function build(L, cont, orig) {
+      count++;
+      var isPre = L.type === 'precomp';
+      var content = isPre ? null : await createNode(L);
 
-      // Parent transform (position/rotation/scale) goes on the frame — NOT opacity, which
-      // AE parenting does not inherit. Static rotation/scale applied when not keyframed.
-      var tr = L.transform || {};
-      var kf = tr.keyframes || {};
-      if (tr.rotation != null && !(kf.rotation && kf.rotation.length)) frame.rotation = -tr.rotation[0];
-      try { applyKeyframes(frame, L, comp, ['position', 'rotation', 'scale']); }
-      catch (err) { motionOk = false; log('Motion skipped for "' + L.name + '": ' + (err && err.message || err)); }
+      if (isParent(L) || isPre) {
+        var tr = L.transform || {}, kf = tr.keyframes || {};
+        // Frame size: a precomp is sized to its sub-composition; a plain parent to its
+        // content bounds. Centered on the anchor so the rotation/scale pivot matches AE.
+        var w, h;
+        if (isPre && L.subComp) { w = Math.max(1, L.subComp.width); h = Math.max(1, L.subComp.height); }
+        else { var cb0 = L.compBounds || [0, 0, 100, 100]; w = Math.max(1, cb0[2]); h = Math.max(1, cb0[3]); }
+        var cb = L.compBounds || [0, 0, w, h];
+        var anchor = L.anchorComp || [cb[0] + w / 2, cb[1] + h / 2];
+        var frame = figma.createFrame();
+        frame.name = L.name;
+        frame.clipsContent = isPre ? true : false; // a precomp clips to its bounds like a comp
+        frame.fills = [];
+        frame.resize(w, h);
+        var fx = anchor[0] - w / 2, fy = anchor[1] - h / 2;
+        cont.appendChild(frame);
+        frame.x = fx - orig[0];
+        frame.y = fy - orig[1];
 
-      // The parent's own visible content sits inside the frame (static; frame carries the
-      // transform). Its OPACITY stays here (opacity is per-layer, not inherited).
-      if (content) {
-        frame.appendChild(content);
-        content.x = cb[0] - fx;
-        content.y = cb[1] - fy;
-        var trOp = tr.opacity, animOp = kf.opacity && kf.opacity.length;
-        if (trOp != null && !animOp) content.opacity = clamp01(trOp[0] / 100);
-        try { applyKeyframes(content, L, comp, ['opacity']); } catch (e) {}
+        // Transform goes on the frame. Precomp opacity DOES inherit (put it on the frame);
+        // a plain parent's opacity does NOT (kept on its own content node below).
+        if (tr.rotation != null && !(kf.rotation && kf.rotation.length)) frame.rotation = -tr.rotation[0];
+        var props = isPre ? ['position', 'rotation', 'scale', 'opacity'] : ['position', 'rotation', 'scale'];
+        if (isPre && tr.opacity != null && !(kf.opacity && kf.opacity.length)) frame.opacity = clamp01(tr.opacity[0] / 100);
+        try { applyKeyframes(frame, L, comp, props); }
+        catch (err) { motionOk = false; log('Motion skipped for "' + L.name + '": ' + (err && err.message || err)); }
+
+        if (isPre) {
+          // Recurse the sub-comp's layers into the frame. Their compBounds are in sub-comp
+          // space, which equals the frame's local space, so origin is [0,0].
+          await buildLayerSet(L.subLayers || [], frame, [0, 0]);
+        } else {
+          if (content) {
+            frame.appendChild(content);
+            content.x = cb[0] - fx;
+            content.y = cb[1] - fy;
+            var trOp = tr.opacity, animOp = kf.opacity && kf.opacity.length;
+            if (trOp != null && !animOp) content.opacity = clamp01(trOp[0] / 100);
+            try { applyKeyframes(content, L, comp, ['opacity']); } catch (e) {}
+            applyTrim(content, L, comp);
+          }
+          var kids = kidsOf[L.index].slice().sort(function (a, b) { return b.index - a.index; });
+          for (var i = 0; i < kids.length; i++) await build(kids[i], frame, [fx, fy]);
+        }
+      } else {
+        if (!content) return;
+        cont.appendChild(content);
+        positionNode(content, L, comp, orig);
+        try { applyKeyframes(content, L, comp); }
+        catch (err) { motionOk = false; log('Motion skipped for "' + L.name + '": ' + (err && err.message || err)); }
         applyTrim(content, L, comp);
       }
-
-      // Children nest inside the frame. Append highest AE index first so index 1 ends on top.
-      var kids = childrenOf[L.index].slice().sort(function (a, b) { return b.index - a.index; });
-      for (var i = 0; i < kids.length; i++) await build(kids[i], frame, [fx, fy]);
-    } else {
-      if (!content) return;
-      container.appendChild(content);
-      positionNode(content, L, comp, origin);
-      try { applyKeyframes(content, L, comp); }
-      catch (err) { motionOk = false; log('Motion skipped for "' + L.name + '": ' + (err && err.message || err)); }
-      applyTrim(content, L, comp);
     }
+
+    var ordered = roots.slice().sort(function (a, b) { return b.index - a.index; });
+    for (var r = 0; r < ordered.length; r++) await build(ordered[r], container, origin);
   }
 
-  // Root layers, highest AE index first so layer 1 renders on top.
-  var roots = rootLayers.slice().sort(function (a, b) { return b.index - a.index; });
-  for (var r = 0; r < roots.length; r++) await build(roots[r], root, [0, 0]);
+  await buildLayerSet(data.layers, root, [0, 0]);
 
   figma.currentPage.selection = [root];
   figma.viewport.scrollAndZoomIntoView([root]);
@@ -154,12 +158,36 @@ async function createNode(L) {
 async function createText(L) {
   var node = figma.createText();
   var t = L.text || {};
-  // Always have a loadable font; fall back to Inter Regular if AE font isn't present.
-  var font = await loadFontSafe(t.font);
+  // Always have a loadable font; prefer AE's family+style, fall back to Inter.
+  var font = await loadFontSafe(t.fontFamily || t.font, t.fontStyle);
   node.fontName = font;
-  node.characters = (t.value != null) ? String(t.value) : L.name;
+  node.characters = (t.value != null) ? String(t.value) : L.name; // \n -> multi-line
+
+  // Paragraph text (fixed box) vs point text (auto-size).
+  if (t.boxSize && t.boxSize[0] > 0) {
+    node.textAutoResize = 'HEIGHT';
+    node.resize(t.boxSize[0], node.height);
+  } else {
+    node.textAutoResize = 'WIDTH_AND_HEIGHT';
+  }
+
   if (t.fontSize) node.fontSize = t.fontSize;
-  if (t.color) node.fills = [solidPaint(t.color)];
+  node.fills = t.color ? [solidPaint(t.color)] : [];
+  if (t.stroke && t.stroke.color) {
+    node.strokes = [solidPaint(t.stroke.color)];
+    if (t.stroke.width) node.strokeWeight = t.stroke.width;
+  }
+
+  // Alignment: AE ParagraphJustification enum -> Figma textAlignHorizontal.
+  // 7413=left, 7414=right, 7415=center (AE enum values).
+  var j = t.justification;
+  node.textAlignHorizontal = (j === 7414) ? 'RIGHT' : (j === 7415) ? 'CENTER' : 'LEFT';
+
+  // Tracking (AE 1/1000 em) -> letter spacing in px at this font size.
+  if (t.tracking) node.letterSpacing = { unit: 'PIXELS', value: (t.tracking / 1000) * (t.fontSize || node.fontSize) };
+  // Leading (AE line height in px) -> Figma lineHeight.
+  if (t.leading) node.lineHeight = { unit: 'PIXELS', value: t.leading };
+
   return node;
 }
 
@@ -508,15 +536,17 @@ function paintFor(paint, layerName, which) {
   return { type: type, gradientTransform: transform, gradientStops: stops };
 }
 
-async function loadFontSafe(family) {
+async function loadFontSafe(family, style) {
   var candidates = [];
-  if (family) candidates.push({ family: family, style: 'Regular' });
+  if (family) {
+    if (style) candidates.push({ family: family, style: style });   // best: "Segoe Sans Display" / "Semilight"
+    candidates.push({ family: family, style: 'Regular' });
+  }
   candidates.push({ family: 'Inter', style: 'Regular' });
   for (var i = 0; i < candidates.length; i++) {
     try { await figma.loadFontAsync(candidates[i]); return candidates[i]; }
     catch (e) { /* try next */ }
   }
-  // last resort: whatever the default text node ships with
   await figma.loadFontAsync({ family: 'Roboto', style: 'Regular' });
   return { family: 'Roboto', style: 'Regular' };
 }
