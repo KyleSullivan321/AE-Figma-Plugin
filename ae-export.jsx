@@ -465,6 +465,21 @@ function exportComp() {
         return g;
     }
 
+    // Stroke line join / cap -> Figma names. AE: join 1=miter 2=round 3=bevel;
+    // cap 1=butt 2=round 3=square. A ROUND join is what softens star/corner points.
+    function strokeJoin(pr) {
+        try {
+            var j = pr.property("ADBE Vector Stroke Line Join").value;
+            return j === 2 ? "ROUND" : j === 3 ? "BEVEL" : "MITER";
+        } catch (e) { return null; }
+    }
+    function strokeCap(pr) {
+        try {
+            var c = pr.property("ADBE Vector Stroke Line Cap").value;
+            return c === 2 ? "ROUND" : c === 3 ? "SQUARE" : "NONE";
+        } catch (e) { return null; }
+    }
+
     function firstPaints(group) {
         var result = { fill: null, stroke: null };
         function walk(g) {
@@ -480,11 +495,13 @@ function exportComp() {
                     } else if (mn === "ADBE Vector Graphic - Stroke" && result.stroke === null && pr.enabled) {
                         result.stroke = {
                             color: color(pr.property("ADBE Vector Stroke Color").value),
-                            width: round(pr.property("ADBE Vector Stroke Width").value)
+                            width: round(pr.property("ADBE Vector Stroke Width").value),
+                            join: strokeJoin(pr), cap: strokeCap(pr)
                         };
                     } else if (mn === "ADBE Vector Graphic - G-Stroke" && result.stroke === null && pr.enabled) {
                         var gs = gradInfo(pr);
                         try { gs.width = round(pr.property("ADBE Vector Stroke Width").value); } catch (e) {}
+                        gs.join = strokeJoin(pr); gs.cap = strokeCap(pr);
                         result.stroke = gs;
                     }
                 } catch (e) {}

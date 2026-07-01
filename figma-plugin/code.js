@@ -248,8 +248,10 @@ function makeShapeNode(s, size, name) {
     if (s.points) node.pointCount = Math.max(3, s.points);
     if (s.innerRatio != null) node.innerRadius = clamp01(s.innerRatio);
     node.resize(w, h);
-    // AE star point roundness (0-100%) -> Figma corner radius (px). Approximate.
-    if (s.roundness && 'cornerRadius' in node) node.cornerRadius = (s.roundness / 100) * Math.min(w, h) * 0.25;
+    // AE star GEOMETRY roundness (0-100%) -> Figma corner radius (px). Conservative:
+    // cornerRadius scales with star size, so a large factor blobs it into a flower. The
+    // usual soft-point look comes from the stroke ROUND join (handled below), not this.
+    if (s.roundness && 'cornerRadius' in node) node.cornerRadius = (s.roundness / 100) * Math.min(w, h) * 0.08;
   } else if (kind === 'polygon') {
     node = figma.createPolygon();
     if (s.points) node.pointCount = Math.max(3, s.points);
@@ -265,6 +267,9 @@ function makeShapeNode(s, size, name) {
     if (s.stroke.gradient) node.strokes = [paintFor(s.stroke, name, 'stroke')];
     else if (s.stroke.color) node.strokes = [solidPaint(s.stroke.color)];
     if (s.stroke.width) node.strokeWeight = s.stroke.width;
+    // Line join softens star/polygon/corner points — the "rounding" seen on strokes.
+    if (s.stroke.join && 'strokeJoin' in node) node.strokeJoin = s.stroke.join;
+    if (s.stroke.cap && 'strokeCap' in node) node.strokeCap = s.stroke.cap;
   }
   if (s.cornerRadius && 'cornerRadius' in node) {
     node.cornerRadius = Math.min(s.cornerRadius, Math.min(w, h) / 2);
