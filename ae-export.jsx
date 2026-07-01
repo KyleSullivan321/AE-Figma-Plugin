@@ -474,6 +474,22 @@ function exportComp() {
     var btn = win.add("button", undefined, "Export composition…");
     btn.onClick = function () { exportComp(); };
 
+    // Honest heads-up: what the exporter cannot bring across, so results aren't surprising.
+    var note = win.add("panel", undefined, "What won't transfer");
+    note.orientation = "column";
+    note.alignChildren = ["left", "top"];
+    note.margins = 10;
+    note.spacing = 3;
+    var limits = [
+        "• Text animators (per-char/word/line)",
+        "• Gradient colors (imports as gray placeholder)",
+        "• Shape vector paths (exported as bounding box)",
+        "• Effects, masks, blend modes, expressions",
+        "• 3D layers, cameras, lights",
+        "• Rotated static shapes (come in axis-aligned)"
+    ];
+    for (var i = 0; i < limits.length; i++) note.add("statictext", undefined, limits[i]);
+
     win.layout.layout(true);
     if (win instanceof Window) { win.center(); win.show(); }
 })(this);
